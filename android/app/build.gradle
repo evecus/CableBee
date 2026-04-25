@@ -102,8 +102,8 @@ android {
         jniLibs {
             useLegacyPackaging true   // 不压缩 .so，保证文件可以直接 chmod+exec
         }
-        doNotStrip "**/libadb.so"
-        doNotStrip "**/libfastboot.so"
+        doNotStrip "**/libcablebee_adb.so"
+        doNotStrip "**/libcablebee_fastboot.so"
     }
 
     lint {

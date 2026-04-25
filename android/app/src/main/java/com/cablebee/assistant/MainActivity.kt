@@ -9,7 +9,6 @@ import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.*
 import android.util.Log
 import java.io.File
-import java.io.FileOutputStream
 
 private const val TAG = "CableBee"
 
@@ -25,37 +24,25 @@ class MainActivity : FlutterActivity() {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var usbEventSink: EventChannel.EventSink? = null
 
-    // adb 二进制路径（files/adb）
+    // adb/fastboot 二进制路径（来自 nativeLibraryDir，Android 保证可执行）
     private lateinit var adbBin: File
+    private lateinit var fastbootBin: File
     private lateinit var adbHome: File   // HOME 目录，key 存在此目录下的 .android/
 
     // 已"连接"的 serial 集合（逻辑层管理）
     private val connectedSerials = mutableSetOf<String>()
 
-    // ── 初始化：从 assets 解压 adb 到 files/，chmod +x ─────────────────────
+    // ── 初始化：指向 nativeLibraryDir 里的二进制 ────────────────────────────
+    // nativeLibraryDir = /data/app/包名/lib/arm64/，Android 保证可执行，无需 chmod
 
-    private fun extractBinaries() {
-        adbHome = filesDir          // HOME=/data/user/0/包名/files/../ → 实际用 filesDir
-        adbBin  = File(filesDir, "adb")
-
-        // 只在文件不存在或版本更新时解压
-        if (!adbBin.exists() || adbBin.length() == 0L) {
-            Log.i(TAG, "Extracting adb binary...")
-            assets.open("adb").use { inp ->
-                FileOutputStream(adbBin).use { out -> inp.copyTo(out) }
-            }
-        }
-        // fastboot 也解压
-        val fastbootBin = File(filesDir, "fastboot")
-        if (!fastbootBin.exists() || fastbootBin.length() == 0L) {
-            assets.open("fastboot").use { inp ->
-                FileOutputStream(fastbootBin).use { out -> inp.copyTo(out) }
-            }
-        }
-        // chmod +x
-        Runtime.getRuntime().exec(arrayOf("chmod", "755", adbBin.absolutePath)).waitFor()
-        Runtime.getRuntime().exec(arrayOf("chmod", "755", fastbootBin.absolutePath)).waitFor()
-        Log.i(TAG, "adb binary ready: ${adbBin.absolutePath} (${adbBin.length()} bytes)")
+    private fun initBinaries() {
+        val nativeDir = applicationInfo.nativeLibraryDir
+        adbBin      = File(nativeDir, "libcablebee_adb.so")
+        fastbootBin = File(nativeDir, "libcablebee_fastboot.so")
+        // HOME 指向 filesDir，adb key 存在 filesDir/.android/adbkey
+        adbHome = filesDir
+        Log.i(TAG, "adb: ${adbBin.absolutePath} exists=${adbBin.exists()} size=${adbBin.length()}")
+        Log.i(TAG, "fastboot: ${fastbootBin.absolutePath} exists=${fastbootBin.exists()}")
     }
 
     // ── 启动 adb server ──────────────────────────────────────────────────────
@@ -136,14 +123,12 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        // 初始化（在主线程外执行）
+        // 同步初始化（不涉及 IO，只是设置路径）
+        initBinaries()
+        // 异步启动 adb server
         scope.launch {
-            try {
-                extractBinaries()
-                startAdbServer()
-            } catch (e: Exception) {
-                Log.e(TAG, "Init error: ${e.message}")
-            }
+            try { startAdbServer() }
+            catch (e: Exception) { Log.e(TAG, "startAdbServer error: ${e.message}") }
         }
 
         // ── USB ───────────────────────────────────────────────────────────
@@ -175,9 +160,9 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
 
-                    // getNativeLibraryDir → String（保持兼容，BinaryManager 需要）
+                    // getNativeLibraryDir → String（BinaryManager 兼容）
                     "getNativeLibraryDir" -> {
-                        result.success(filesDir.absolutePath)
+                        result.success(applicationInfo.nativeLibraryDir)
                     }
 
                     // connect(host, port) → serial
