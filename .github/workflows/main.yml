@@ -1,4 +1,4 @@
-name: Build & Release CableBee APK
+name: Build CableBee APK
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ env:
 
 jobs:
   build:
-    name: Build & Release
+    name: Build APK
     runs-on: ubuntu-latest
 
     steps:
@@ -35,36 +35,40 @@ jobs:
           channel: 'stable'
           cache: true
 
+      - name: Flutter version info
+        run: flutter --version
+
       # ── Dependencies ──────────────────────────────────────────────
       - name: Get Flutter dependencies
         run: flutter pub get
 
-      # ── Build version & Tag ───────────────────────────────────────
-      - name: Compute version and tag
-        id: vars
+      # ── Code quality ──────────────────────────────────────────────
+      - name: Analyze code
+        run: flutter analyze --no-fatal-infos
+        continue-on-error: true
+
+      # ── Build version string ───────────────────────────────────────
+      - name: Compute version name
+        id: version
         run: |
-          TIMESTAMP=$(date +'%Y%m%d-%H%M')
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/v}"
-            TAG_NAME="v${VERSION}"
           else
-            VERSION="0.0.0-dev.${TIMESTAMP}"
-            TAG_NAME="build-${TIMESTAMP}"
+            VERSION="0.0.0-dev+$(git rev-parse --short HEAD)"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
-          echo "timestamp=$TIMESTAMP" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION"
 
-      # ── Keystore (Optional: only if secrets exist) ─────────────────
+      # ── Keystore (release only) ────────────────────────────────────
       - name: Decode keystore
-        if: env.KEYSTORE_BASE64 != ''
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
           echo "$KEYSTORE_BASE64" | base64 --decode > android/app/keystore.jks
 
       - name: Write key.properties
-        if: env.KEYSTORE_BASE64 != ''
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
@@ -78,56 +82,76 @@ jobs:
           EOF
 
       # ── Build APKs ────────────────────────────────────────────────
-      - name: Build split APKs
+      - name: Build arm64 APK
         run: |
           flutter build apk --release \
-            --split-per-abi \
-            --build-name="${{ steps.vars.outputs.version }}" \
+            --target-platform android-arm64 \
+            --build-name="${{ steps.version.outputs.version }}" \
             --build-number="${{ github.run_number }}" \
-            --dart-define=APP_VERSION="${{ steps.vars.outputs.version }}" || true
+            --dart-define=APP_VERSION="${{ steps.version.outputs.version }}" || true
 
           BUILD_DIR="build/app/outputs/flutter-apk"
           if ls "$BUILD_DIR"/app-*-release.apk 1>/dev/null 2>&1; then
-            echo "APKs generated successfully."
+            echo "APK found, build succeeded."
           else
-            echo "ERROR: No APKs found." && exit 1
+            echo "ERROR: No APK found." && exit 1
           fi
 
       # ── Rename artifacts ──────────────────────────────────────────
       - name: Rename APK files
         run: |
-          VER="${{ steps.vars.outputs.version }}"
+          VER="${{ steps.version.outputs.version }}"
           BUILD_DIR="build/app/outputs/flutter-apk"
 
-          [ -f "$BUILD_DIR/app-arm64-v8a-release.apk" ] && \
-            mv "$BUILD_DIR/app-arm64-v8a-release.apk" "$BUILD_DIR/CableBee-${VER}-arm64.apk"
+          [ -f "$BUILD_DIR/app-release.apk" ] && \
+            mv "$BUILD_DIR/app-release.apk" \
+               "$BUILD_DIR/CableBee-${VER}-arm64.apk"
 
-          [ -f "$BUILD_DIR/app-armeabi-v7a-release.apk" ] && \
-            mv "$BUILD_DIR/app-armeabi-v7a-release.apk" "$BUILD_DIR/CableBee-${VER}-armeabi.apk"
+          echo "=== Output APKs ==="
+          ls -lh "$BUILD_DIR/"*.apk 2>/dev/null || echo "No APKs found"
 
-      # ── GitHub Release ──────────────────────────────────────────
+      # ── Upload artifacts ──────────────────────────────────────────
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CableBee-${{ steps.version.outputs.version }}-apks
+          path: build/app/outputs/flutter-apk/CableBee-*.apk
+          retention-days: 30
+          if-no-files-found: warn
+
+      # ── GitHub Release (tag only) ─────────────────────────────────
       - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.vars.outputs.tag_name }}
-          name: CableBee Build ${{ steps.vars.outputs.timestamp }}
+          name: CableBee v${{ steps.version.outputs.version }}
           body: |
-            ## CableBee ADB Assistant
-            自动构建版本：`${{ steps.vars.outputs.version }}`
-            构建分支：`${{ github.ref_name }}`
-            提交哈希：`${{ github.sha }}`
+            ## CableBee ADB Assistant v${{ steps.version.outputs.version }}
 
-            ### 架构说明
-            - **arm64.apk**: 适用于现代 64 位安卓设备（推荐）。
-            - **armeabi.apk**: 适用于旧款 32 位安卓设备。
+            ### Downloads
+            | File | Architecture | Notes |
+            |------|-------------|-------|
+            | `CableBee-*-arm64.apk` | arm64-v8a | 适用于所有现代 Android 设备 |
+
+            ### What's New
+            <!-- Add release notes here -->
+
+            ### Requirements
+            - Android 8.0+ (API 26)
+            - USB OTG support for USB mode
+            - Wireless Debugging enabled on target device for Wi-Fi mode
+
+            ---
+            Built from commit `${{ github.sha }}` · Run #${{ github.run_number }}
           files: |
             build/app/outputs/flutter-apk/CableBee-*.apk
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref, '-') }}
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── Separate job: summary ─────────────────────────────────────
+  # ── Separate job: build summary ────────────────────────────────
   summary:
     name: Build Summary
     runs-on: ubuntu-latest
@@ -137,8 +161,11 @@ jobs:
       - name: Write job summary
         run: |
           echo "## CableBee Build Result" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Status | ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Release Tag | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch/Tag | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Run # | ${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Triggered by | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build status | ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY
