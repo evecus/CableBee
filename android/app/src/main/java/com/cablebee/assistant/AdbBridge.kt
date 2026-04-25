@@ -199,10 +199,6 @@ class AdbConnection private constructor(
             val msg = AdbMessage.readFrom(inp)
             Log.v(TAG, "pump: cmd=0x${msg.command.toString(16)} arg0=${msg.arg0} arg1=${msg.arg1} dataLen=${msg.data.size}")
             dispatch(msg)
-        } catch (e: java.net.SocketTimeoutException) {
-            // FIX(Bug-E): 空闲超时不代表连接断开，不能标记 connected=false。
-            // 原代码把所有异常一律断连，导致连接被误判为死亡后触发重连重授权。
-            Log.v(TAG, "pump: socket idle timeout, ignoring")
         } catch (e: Exception) {
             Log.w(TAG, "pump exception: ${e.javaClass.simpleName}: ${e.message}")
             connected.set(false)
@@ -356,8 +352,9 @@ class AdbConnection private constructor(
     companion object {
         fun connect(host: String, port: Int, keyPair: KeyPair): AdbConnection {
             val socket = Socket()
-            socket.connect(InetSocketAddress(host, port), 5_000)
-            socket.soTimeout = 15_000
+            socket.connect(InetSocketAddress(host, port), 8_000)
+            // 握手阶段给足够长的超时（用户需要时间点允许弹窗）
+            socket.soTimeout = 30_000
             val inp = socket.getInputStream()
             val out = socket.getOutputStream()
 
@@ -367,24 +364,25 @@ class AdbConnection private constructor(
                 "host::CableBee\u0000".toByteArray(Charsets.UTF_8)
             ).writeTo(out)
 
-            // Handshake:
-            // 1. Device sends AUTH_TOKEN  → we reply with our RSA signature
-            // 2a. If key is known → device sends CNXN → done
-            // 2b. If key is unknown → device sends AUTH_TOKEN again
-            //     → we reply with AUTH_RSAPUBLICKEY
-            //     → device shows "Allow USB debugging?" dialog
-            //     → user taps Allow → device sends CNXN → done
-            //        (Android 11+: device sends another AUTH_TOKEN first → we re-sign → CNXN)
-            // We wait up to 30 s for the user to tap the dialog.
+            // Handshake 状态机:
+            // 1. 设备发 AUTH_TOKEN → 我们回 AUTH_SIGNATURE（用私钥签名）
+            // 2a. 公钥已知 → 设备直接发 CNXN → 握手完成，不弹窗
+            // 2b. 公钥未知 → 设备再发 AUTH_TOKEN → 我们回 AUTH_RSAPUBLICKEY
+            //     → 设备弹"允许调试"窗口，用户点允许 → 设备发 CNXN → 完成
+            //     → 之后同一公钥连接走 2a，不再弹窗
             var triedSignature = false
             var triedPublicKey = false
             val deadline = System.currentTimeMillis() + 30_000
-            socket.soTimeout = 30_000
             while (System.currentTimeMillis() < deadline) {
-                val msg = AdbMessage.readFrom(inp)
+                val msg = try {
+                    AdbMessage.readFrom(inp)
+                } catch (e: java.net.SocketTimeoutException) {
+                    // 超时继续等，不中断握手（用户可能还在看弹窗）
+                    continue
+                }
                 when (msg.command) {
                     AdbCmd.CNXN -> {
-                        // 握手完成，恢复正常读超时
+                        // 握手成功，正常工作超时改回 15s
                         socket.soTimeout = 15_000
                         return AdbConnection("$host:$port", socket, inp, out, keyPair)
                     }
@@ -395,27 +393,21 @@ class AdbConnection private constructor(
                                 val sig = AdbCrypto.sign(keyPair, msg.data)
                                 AdbMessage(AdbCmd.AUTH, AdbCmd.AUTH_SIGNATURE, 0u, sig).writeTo(out)
                             } else if (!triedPublicKey) {
+                                // 签名未通过（公钥未知），发公钥，等用户点允许
                                 triedPublicKey = true
                                 val pub = AdbCrypto.encodePublicKey(keyPair)
                                 AdbMessage(AdbCmd.AUTH, AdbCmd.AUTH_RSAPUBLICKEY, 0u, pub).writeTo(out)
-                            } else {
-                                // FIX(Bug-C): Android 11+ 在用户点击 Allow 后还会再发一次 AUTH_TOKEN。
-                                // 原代码此处什么都不做，静默等待30秒超时，导致弹窗消失却连不上。
-                                // 修复：收到第3次 AUTH_TOKEN 时重新签名，握手正常完成。
-                                Log.d(TAG, "handshake: re-signing after user accepted (Android 11+ flow)")
-                                val sig = AdbCrypto.sign(keyPair, msg.data)
-                                AdbMessage(AdbCmd.AUTH, AdbCmd.AUTH_SIGNATURE, 0u, sig).writeTo(out)
                             }
+                            // 已发公钥，继续等 CNXN
                         }
                         else -> {
-                            // AUTH_RSAPUBLICKEY request — send it
                             val pub = AdbCrypto.encodePublicKey(keyPair)
                             AdbMessage(AdbCmd.AUTH, AdbCmd.AUTH_RSAPUBLICKEY, 0u, pub).writeTo(out)
                         }
                     }
                 }
             }
-            throw IOException("Handshake timed out — please accept the authorization dialog on the device")
+            throw IOException("握手超时，请在设备上点击允许调试")
         }
     }
 }
@@ -432,17 +424,21 @@ object AdbBridge {
     fun init(filesDir: java.io.File) {
         if (!::keyPair.isInitialized) {
             keyPair = AdbCrypto.loadOrGenerateKeyPair(filesDir)
+            val pub = AdbCrypto.encodePublicKey(keyPair)
+            // 打印公钥指纹，用于确认每次 app 启动使用的是同一个 key
+            Log.i(TAG, "ADB key fingerprint: ${pub.take(16).joinToString("") { "%02x".format(it) }}...")
         }
     }
 
     fun connect(host: String, port: Int): String {
         val key = "$host:$port"
-        // 复用现有连接：connected 为 true 且 socket 实际可用时直接返回，避免重复 auth 弹窗
+        // 优先复用：socket 存活时直接复用，无需重新握手，不触发授权弹窗
         connections[key]?.let { existing ->
-            if (existing.connected.get() && existing.isAlive()) {
+            if (existing.isAlive()) {
+                existing.connected.set(true)
                 return key
             }
-            // 旧连接已死，先关闭清理
+            // socket 已死才清理重建
             runCatching { existing.close() }
             connections.remove(key)
         }
@@ -450,9 +446,21 @@ object AdbBridge {
         return key
     }
 
-    fun disconnect(serial: String) { connections.remove(serial)?.close() }
-    fun disconnectAll()            { connections.values.forEach { it.close() }; connections.clear() }
-    fun devices(): List<String>    = connections.filter { it.value.connected.get() }.keys.toList()
+    /**
+     * 软断开：仅将 connected 标记置 false，保留 socket 连接对象在 map 中不销毁。
+     * 下次 connect() 同一 host:port 时 socket 仍然存活，直接复用，不触发设备端授权弹窗。
+     */
+    fun disconnect(serial: String) {
+        connections[serial]?.connected?.set(false)
+    }
+
+    /** App 退出时才真正关闭所有连接并清空 map。 */
+    fun disconnectAll() {
+        connections.values.forEach { runCatching { it.close() } }
+        connections.clear()
+    }
+
+    fun devices(): List<String> = connections.filter { it.value.connected.get() }.keys.toList()
 
     fun shell(serial: String, command: String, timeoutMs: Long = 15_000): String =
         conn(serial).shell(command, timeoutMs)
