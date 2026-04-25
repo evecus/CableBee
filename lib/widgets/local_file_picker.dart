@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../utils/theme.dart';
 
 // ── 排序方式 ───────────────────────────────────────────────────────────────────
@@ -83,6 +84,22 @@ class _LocalFilePickerSheetState extends State<_LocalFilePickerSheet> {
   @override
   void initState() {
     super.initState();
+    _requestPermissionAndLoad();
+  }
+
+  Future<void> _requestPermissionAndLoad() async {
+    // Android 11+: MANAGE_EXTERNAL_STORAGE; Android 10-: READ_EXTERNAL_STORAGE
+    if (Platform.isAndroid) {
+      final manageStatus = await Permission.manageExternalStorage.status;
+      if (manageStatus.isDenied || manageStatus.isPermanentlyDenied) {
+        await Permission.manageExternalStorage.request();
+      }
+      // 低版本降级申请
+      final readStatus = await Permission.storage.status;
+      if (readStatus.isDenied) {
+        await Permission.storage.request();
+      }
+    }
     // 找到第一个存在的根目录
     String startPath = widget.initialPath ?? '';
     if (startPath.isEmpty || !Directory(startPath).existsSync()) {
