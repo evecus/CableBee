@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import '../services/adb_service.dart';
 import '../utils/theme.dart';
 import '../widgets/common.dart';
+import '../widgets/local_file_picker.dart';
 
 class FilesScreen extends StatefulWidget {
   const FilesScreen({super.key});
@@ -68,10 +68,14 @@ class _FilesScreenState extends State<FilesScreen> with AutomaticKeepAliveClient
   }
 
   Future<void> _pushFile() async {
-    final result = await FilePicker.platform.pickFiles();
-    if (result == null || result.files.single.path == null) return;
-    final localPath = result.files.single.path!;
-    final fileName = result.files.single.name;
+    final results = await showLocalFilePicker(
+      context,
+      allowMultiple: false,
+      allowFolders: false,
+    );
+    if (results == null || results.isEmpty) return;
+    final localPath = results.first;
+    final fileName = localPath.split('/').last;
     final remotePath = '$_currentPath/$fileName';
 
     setState(() {

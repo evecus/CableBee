@@ -59,6 +59,7 @@ class FastbootService extends ChangeNotifier {
   Future<FastbootResult> oemUnlock()                      => run(['flashing', 'unlock']);
   Future<FastbootResult> oemLock()                        => run(['flashing', 'lock']);
   Future<FastbootResult> wipeData()                       => run(['-w']);
+  Future<FastbootResult> runRaw(List<String> args)        => run(args);
 
   Future<Map<String, String>> getAllVars() async {
     final r   = await run(['getvar', 'all']);

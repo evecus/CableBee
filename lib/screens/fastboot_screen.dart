@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:file_picker/file_picker.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../services/fastboot_service.dart';
 import '../utils/theme.dart';
 import '../widgets/common.dart';
+import '../widgets/local_file_picker.dart';
 
 class FastbootScreen extends StatefulWidget {
   const FastbootScreen({super.key});
@@ -12,338 +13,626 @@ class FastbootScreen extends StatefulWidget {
 }
 
 class _FastbootScreenState extends State<FastbootScreen> {
-  Map<String, String> _vars = {};
-  bool _loading = false;
+  final _cmdCtrl = TextEditingController();
+  final _scrollCtrl = ScrollController();
   bool _busy = false;
-  String? _lastOutput;
-  final _outputHistory = <String>[];
+  final _outputLines = <String>[];
 
   @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _checkDevice());
+  void dispose() {
+    _cmdCtrl.dispose();
+    _scrollCtrl.dispose();
+    super.dispose();
   }
 
-  Future<void> _checkDevice() async {
-    setState(() => _loading = true);
-    final fb = context.read<FastbootService>();
-    await fb.devices();
-    if (fb.deviceConnected) {
-      final vars = await fb.getAllVars();
-      setState(() { _vars = vars; });
-    }
-    setState(() => _loading = false);
-  }
-
-  Future<void> _exec(Future<FastbootResult> Function() action) async {
-    setState(() { _busy = true; _lastOutput = null; });
-    final r = await action();
+  Future<void> _pickFile() async {
+    final results = await showLocalFilePicker(
+      context,
+      allowMultiple: false,
+      allowFolders: false,
+    );
+    if (results == null || results.isEmpty) return;
+    final path = results.first;
     setState(() {
-      _busy = false;
-      _lastOutput = r.output;
-      _outputHistory.insert(0, r.output);
-      if (_outputHistory.length > 20) _outputHistory.removeLast();
+      final current = _cmdCtrl.text.trimRight();
+      _cmdCtrl.text = current.isEmpty ? path : '$current $path';
+      _cmdCtrl.selection = TextSelection.collapsed(offset: _cmdCtrl.text.length);
     });
   }
 
-  Future<void> _flashPartition() async {
-    final partition = await showInputDialog(context,
-      title: '刷写分区',
-      hint: '例如 boot、recovery、system、vendor',
-    );
-    if (partition == null || partition.isEmpty) return;
+  Future<void> _execute() async {
+    final cmd = _cmdCtrl.text.trim();
+    if (cmd.isEmpty) return;
+    FocusScope.of(context).unfocus();
 
-    final file = await FilePicker.platform.pickFiles(
-      type: FileType.any,
-      dialogTitle: 'Select .img file for $partition',
-    );
-    if (file == null || file.files.single.path == null) return;
+    setState(() {
+      _busy = true;
+      _outputLines.add('\$ $cmd');
+    });
+    _scrollToBottom();
 
-    final ok = await showConfirmDialog(context,
-      title: 'Flash $partition',
-      message: 'Flash "${file.files.single.name}" to partition "$partition"?\n\n'
-          'Flashing the wrong image can brick your device.',
-      confirmText: '刷写',
-      destructive: true,
-    );
-    if (ok != true) return;
+    String fullCmd = cmd;
+    if (!cmd.startsWith('fastboot ') && cmd != 'fastboot') {
+      fullCmd = 'fastboot $cmd';
+    }
 
-    await _exec(() => context.read<FastbootService>()
-        .flash(partition, file.files.single.path!));
-    _checkDevice();
+    final parts = fullCmd.split(RegExp(r'\s+'));
+    final args = parts.sublist(1);
+
+    final fb = context.read<FastbootService>();
+    FastbootResult result;
+
+    if (args.isEmpty) {
+      result = await fb.devices();
+    } else {
+      final sub = args[0];
+      if (sub == 'flash' && args.length >= 3) {
+        result = await fb.flash(args[1], args.sublist(2).join(' '));
+      } else if (sub == 'erase' && args.length >= 2) {
+        result = await fb.erase(args[1]);
+      } else if (sub == 'reboot') {
+        result = await fb.reboot(args.length >= 2 ? args[1] : null);
+      } else if (sub == 'flashing' && args.length >= 2 && args[1] == 'unlock') {
+        result = await fb.oemUnlock();
+      } else if (sub == 'flashing' && args.length >= 2 && args[1] == 'lock') {
+        result = await fb.oemLock();
+      } else if (sub == 'getvar' && args.length >= 2) {
+        result = await fb.getVar(args[1]);
+      } else {
+        result = await fb.runRaw(args);
+      }
+    }
+
+    final out = result.output.trim();
+    setState(() {
+      _busy = false;
+      if (out.isNotEmpty) _outputLines.addAll(out.split('\n'));
+      _outputLines.add('');
+    });
+    _scrollToBottom();
   }
 
-  Future<void> _erasePartition() async {
-    final partition = await showInputDialog(context,
-      title: '擦除分区',
-      hint: '例如 userdata、cache',
-    );
-    if (partition == null || partition.isEmpty) return;
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollCtrl.hasClients) {
+        _scrollCtrl.animateTo(
+          _scrollCtrl.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
 
-    final ok = await showConfirmDialog(context,
-      title: 'Erase $partition',
-      message: 'Erase partition "$partition"?\n\nAll data on this partition will be lost.',
-      confirmText: 'Erase',
-      destructive: true,
-    );
-    if (ok != true) return;
+  void _clearOutput() => setState(() => _outputLines.clear());
 
-    await _exec(() => context.read<FastbootService>().erase(partition));
+  void _fillCmd(String cmd) {
+    setState(() {
+      _cmdCtrl.text = cmd;
+      _cmdCtrl.selection = TextSelection.collapsed(offset: cmd.length);
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    final fb = context.watch<FastbootService>();
-
     return Scaffold(
       backgroundColor: AppTheme.bg0,
       appBar: AppBar(
-        title: const Text('Fastboot'),
+        backgroundColor: AppTheme.bg0,
+        elevation: 0,
+        title: const Text('Fastboot', style: TextStyle(
+          fontFamily: 'SpaceMono', fontSize: 16, fontWeight: FontWeight.w700,
+          color: AppTheme.textPrimary,
+        )),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh_rounded, size: 20),
-            onPressed: _checkDevice,
-            color: AppTheme.textMuted,
+            icon: const Icon(Icons.delete_sweep_rounded, size: 20, color: AppTheme.textMuted),
+            tooltip: '清空输出',
+            onPressed: _clearOutput,
           ),
         ],
       ),
       body: ListView(
-        padding: const EdgeInsets.only(bottom: 40),
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 40),
         children: [
 
-          // ── Device status ──────────────────────────────────────
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-            child: TintedCard(
-              borderColor: fb.deviceConnected
-                  ? AppTheme.success.withOpacity(0.4)
-                  : AppTheme.warning.withOpacity(0.4),
-              padding: const EdgeInsets.all(14),
-              child: Row(children: [
-                Container(
-                  width: 40, height: 40,
-                  decoration: BoxDecoration(
-                    color: fb.deviceConnected
-                        ? AppTheme.success.withOpacity(0.12)
-                        : AppTheme.warning.withOpacity(0.12),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Icon(
-                    fb.deviceConnected
-                        ? Icons.usb_rounded
-                        : Icons.usb_off_rounded,
-                    color: fb.deviceConnected ? AppTheme.success : AppTheme.warning,
-                    size: 20,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      fb.deviceConnected ? 'Device in Fastboot' : 'No Fastboot Device',
-                      style: TextStyle(
-                        fontFamily: 'SpaceMono', fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                        color: fb.deviceConnected
-                            ? AppTheme.success : AppTheme.warning,
-                      ),
-                    ),
-                    if (fb.deviceSerial != null) ...[
-                      const SizedBox(height: 3),
-                      Text(fb.deviceSerial!, style: const TextStyle(
-                        fontFamily: 'JetBrainsMono', fontSize: 11,
-                        color: AppTheme.textMuted,
-                      )),
-                    ],
-                  ],
-                )),
-                if (_loading)
-                  const SizedBox(
-                    width: 16, height: 16,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation(AppTheme.primary),
-                    ),
-                  ),
-              ]),
-            ),
-          ),
+          // ── 设备状态卡片 ──
+          _DeviceStatusCard(),
 
-          if (!fb.deviceConnected) ...[
-            const SizedBox(height: 12),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: TintedCard(
-                padding: const EdgeInsets.all(14),
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  const Text('How to enter Fastboot mode', style: TextStyle(
-                    fontFamily: 'SpaceMono', fontSize: 12,
-                    fontWeight: FontWeight.w600, color: AppTheme.textPrimary,
-                  )),
-                  const SizedBox(height: 8),
-                  const Text(
-                    '• Connect device via USB OTG\n'
-                    '• Hold Power + Volume Down until fastboot screen\n'
-                    '• Or use ADB → Tools → Reboot to Bootloader',
-                    style: TextStyle(
-                      fontFamily: 'JetBrainsMono', fontSize: 12,
-                      color: AppTheme.textSecondary, height: 1.7,
+          const SizedBox(height: 12),
+
+          // ── 命令输入 + 终端输出 卡片 ──
+          Container(
+            decoration: BoxDecoration(
+              color: AppTheme.bg1,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: AppTheme.bg3),
+            ),
+            child: Column(children: [
+
+              // 命令输入行
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+                child: Row(children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _cmdCtrl,
+                      style: const TextStyle(
+                        fontFamily: 'JetBrainsMono', fontSize: 13,
+                        color: AppTheme.textPrimary,
+                      ),
+                      decoration: InputDecoration(
+                        hintText: 'fastboot flash recovery ...',
+                        hintStyle: const TextStyle(
+                          fontFamily: 'JetBrainsMono', fontSize: 12,
+                          color: AppTheme.textMuted,
+                        ),
+                        prefixIcon: const Padding(
+                          padding: EdgeInsets.only(left: 10, right: 6),
+                          child: Text('\$', style: TextStyle(
+                            fontFamily: 'JetBrainsMono', fontSize: 14,
+                            color: AppTheme.primary, fontWeight: FontWeight.w700,
+                          )),
+                        ),
+                        prefixIconConstraints: const BoxConstraints(minWidth: 0, minHeight: 0),
+                        suffixIcon: _cmdCtrl.text.isNotEmpty
+                            ? IconButton(
+                                icon: const Icon(Icons.close_rounded, size: 15, color: AppTheme.textMuted),
+                                onPressed: () => setState(() => _cmdCtrl.clear()),
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(),
+                              )
+                            : null,
+                        filled: true,
+                        fillColor: AppTheme.bg0,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                          borderSide: const BorderSide(color: AppTheme.bg3),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                          borderSide: const BorderSide(color: AppTheme.bg3),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                          borderSide: const BorderSide(color: AppTheme.primary, width: 1.5),
+                        ),
+                      ),
+                      onChanged: (_) => setState(() {}),
+                      onSubmitted: (_) => _execute(),
                     ),
+                  ),
+                  const SizedBox(width: 8),
+                  _IconBtn(
+                    icon: Icons.folder_open_rounded,
+                    tooltip: '选择本机文件',
+                    color: AppTheme.warning,
+                    onTap: _pickFile,
+                  ),
+                  const SizedBox(width: 6),
+                  _ExecBtn(busy: _busy, onTap: _execute),
+                ]),
+              ),
+
+              const SizedBox(height: 10),
+
+              // 终端输出框
+              Container(
+                margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                height: 220,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0D1117),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: AppTheme.bg3),
+                ),
+                child: Column(children: [
+                  Container(
+                    height: 28,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF161B22),
+                      borderRadius: BorderRadius.vertical(top: Radius.circular(10)),
+                    ),
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    child: Row(children: [
+                      _dot(const Color(0xFFFF5F57)),
+                      const SizedBox(width: 5),
+                      _dot(const Color(0xFFFFBD2E)),
+                      const SizedBox(width: 5),
+                      _dot(const Color(0xFF28C840)),
+                      const Spacer(),
+                      if (_busy)
+                        const SizedBox(width: 10, height: 10,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 1.5,
+                            valueColor: AlwaysStoppedAnimation(AppTheme.primary),
+                          ),
+                        ),
+                      const SizedBox(width: 4),
+                      const Text('fastboot', style: TextStyle(
+                        fontFamily: 'JetBrainsMono', fontSize: 10,
+                        color: Color(0xFF6E7681),
+                      )),
+                    ]),
+                  ),
+                  Expanded(
+                    child: _outputLines.isEmpty
+                        ? const Center(child: Text('等待执行...', style: TextStyle(
+                            fontFamily: 'JetBrainsMono', fontSize: 12,
+                            color: Color(0xFF6E7681),
+                          )))
+                        : ListView.builder(
+                            controller: _scrollCtrl,
+                            padding: const EdgeInsets.all(10),
+                            itemCount: _outputLines.length,
+                            itemBuilder: (_, i) {
+                              final line = _outputLines[i];
+                              final isCmd = line.startsWith('\$');
+                              Color lineColor;
+                              if (isCmd) {
+                                lineColor = AppTheme.primary;
+                              } else if (line.toLowerCase().contains('error') ||
+                                  line.toLowerCase().contains('fail') ||
+                                  line.toLowerCase().contains('failed')) {
+                                lineColor = AppTheme.danger;
+                              } else if (line.toLowerCase().contains('okay') ||
+                                  line.toLowerCase().contains('success') ||
+                                  line.toLowerCase().contains('finished')) {
+                                lineColor = AppTheme.success;
+                              } else {
+                                lineColor = const Color(0xFFE6EDF3);
+                              }
+                              return Padding(
+                                padding: const EdgeInsets.only(bottom: 2),
+                                child: Text(line, style: TextStyle(
+                                  fontFamily: 'JetBrainsMono', fontSize: 12,
+                                  color: lineColor, height: 1.5,
+                                )),
+                              );
+                            },
+                          ),
                   ),
                 ]),
               ),
-            ),
-          ],
-
-          // ── Device vars ────────────────────────────────────────
-          if (_vars.isNotEmpty) ...[
-            const SectionHeader(title: '设备变量'),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: TintedCard(
-                padding: EdgeInsets.zero,
-                child: Column(
-                  children: _vars.entries.take(12).map((e) => Column(children: [
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                      child: Row(children: [
-                        Expanded(flex: 2, child: Text(e.key, style: const TextStyle(
-                          fontFamily: 'SpaceMono', fontSize: 11,
-                          color: AppTheme.textMuted,
-                        ))),
-                        Expanded(flex: 3, child: Text(e.value, style: const TextStyle(
-                          fontFamily: 'JetBrainsMono', fontSize: 12,
-                          color: AppTheme.textPrimary,
-                        ))),
-                      ]),
-                    ),
-                    if (e.key != _vars.keys.skip(11).first)
-                      const Divider(height: 1, indent: 14),
-                  ])).toList(),
-                ),
-              ),
-            ),
-          ],
-
-          // ── Flash & Erase ──────────────────────────────────────
-          const SectionHeader(title: '刷写 / 擦除'),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: TintedCard(
-              padding: EdgeInsets.zero,
-              child: Column(children: [
-                ActionTile(
-                  icon: Icons.flash_on_rounded,
-                  title: '刷写分区',
-                  subtitle: '选择 .img 文件和目标分区',
-                  iconColor: AppTheme.warning,
-                  enabled: fb.deviceConnected && !_busy,
-                  onTap: _flashPartition,
-                ),
-                const Divider(height: 1, indent: 60),
-                ActionTile(
-                  icon: Icons.delete_forever_rounded,
-                  title: '擦除分区',
-                  subtitle: '清空指定分区（如 userdata、cache）',
-                  iconColor: AppTheme.danger,
-                  enabled: fb.deviceConnected && !_busy,
-                  onTap: _erasePartition,
-                ),
-              ]),
-            ),
+            ]),
           ),
-
-          // ── Bootloader lock / unlock ────────────────────────────
-          const SectionHeader(title: 'Bootloader'),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: TintedCard(
-              padding: EdgeInsets.zero,
-              child: Column(children: [
-                ActionTile(
-                  icon: Icons.lock_open_rounded,
-                  title: '解锁 Bootloader',
-                  subtitle: 'fastboot flashing unlock — 将清空设备数据',
-                  iconColor: AppTheme.danger,
-                  enabled: fb.deviceConnected && !_busy,
-                  onTap: () async {
-                    final ok = await showConfirmDialog(context,
-                      title: '解锁 Bootloader',
-                      message: '此操作将清空设备全部数据，'
-                          'void warranty on some devices.\n\nAre you sure?',
-                      confirmText: '解锁',
-                      destructive: true,
-                    );
-                    if (ok == true) _exec(() => context.read<FastbootService>().oemUnlock());
-                  },
-                ),
-                const Divider(height: 1, indent: 60),
-                ActionTile(
-                  icon: Icons.lock_rounded,
-                  title: '锁定 Bootloader',
-                  subtitle: 'fastboot flashing lock',
-                  iconColor: AppTheme.warning,
-                  enabled: fb.deviceConnected && !_busy,
-                  onTap: () async {
-                    final ok = await showConfirmDialog(context,
-                      title: '锁定 Bootloader',
-                      message: '确认锁定 Bootloader？设备可能会清除数据。',
-                      confirmText: '锁定',
-                    );
-                    if (ok == true) _exec(() => context.read<FastbootService>().oemLock());
-                  },
-                ),
-              ]),
-            ),
-          ),
-
-          // ── Reboot ────────────────────────────────────────────
-          const SectionHeader(title: '重启'),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: TintedCard(
-              padding: EdgeInsets.zero,
-              child: Column(children: [
-                ActionTile(
-                  icon: Icons.restart_alt_rounded,
-                  title: '重启到系统',
-                  subtitle: '退出 Fastboot，正常开机',
-                  enabled: fb.deviceConnected && !_busy,
-                  onTap: () => _exec(() => context.read<FastbootService>().reboot()),
-                ),
-                const Divider(height: 1, indent: 60),
-                ActionTile(
-                  icon: Icons.build_circle_outlined,
-                  title: '重启到 Recovery',
-                  enabled: fb.deviceConnected && !_busy,
-                  iconColor: AppTheme.warning,
-                  onTap: () => _exec(() => context.read<FastbootService>().reboot('recovery')),
-                ),
-                const Divider(height: 1, indent: 60),
-                ActionTile(
-                  icon: Icons.developer_mode_rounded,
-                  title: '重启到 Bootloader',
-                  enabled: fb.deviceConnected && !_busy,
-                  iconColor: AppTheme.textMuted,
-                  onTap: () => _exec(() => context.read<FastbootService>().reboot('bootloader')),
-                ),
-              ]),
-            ),
-          ),
-
-          // ── Output ────────────────────────────────────────────
-          if (_lastOutput != null) ...[
-            const SectionHeader(title: '输出'),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: TerminalBox(text: _lastOutput!),
-            ),
-          ],
 
           const SizedBox(height: 24),
+
+          // ── 快捷命令 ──
+          const SectionHeader(title: '快捷命令'),
+          const SizedBox(height: 8),
+
+          Container(
+            decoration: BoxDecoration(
+              color: AppTheme.bg1,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: AppTheme.bg3),
+            ),
+            child: Column(
+              children: _quickCmds.asMap().entries.map((entry) {
+                final i = entry.key;
+                final cmd = entry.value;
+                final isLast = i == _quickCmds.length - 1;
+                return Column(children: [
+                  _QuickCmdTile(
+                    title: cmd.title,
+                    command: cmd.command,
+                    copyCommand: cmd.copyCommand,
+                    iconColor: cmd.color,
+                    icon: cmd.icon,
+                    onFill: () => _fillCmd(cmd.command),
+                  ),
+                  if (!isLast)
+                    const Divider(height: 1, indent: 56, color: AppTheme.bg3),
+                ]);
+              }).toList(),
+            ),
+          ),
         ],
       ),
+    );
+  }
+
+  Widget _dot(Color color) => Container(
+    width: 10, height: 10,
+    decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+  );
+}
+
+// ── 快捷命令数据 ───────────────────────────────────────────────────────────────
+
+class _CmdData {
+  final String title;
+  final String command;
+  final String copyCommand;
+  final IconData icon;
+  final Color color;
+  const _CmdData({
+    required this.title, required this.command, required this.copyCommand,
+    required this.icon, required this.color,
+  });
+}
+
+const _quickCmds = [
+  _CmdData(title: '重启系统', command: 'fastboot reboot',
+    copyCommand: 'fastboot reboot', icon: Icons.restart_alt_rounded, color: AppTheme.success),
+  _CmdData(title: '重启到恢复模式', command: 'fastboot reboot recovery',
+    copyCommand: 'fastboot reboot recovery', icon: Icons.build_circle_outlined, color: AppTheme.warning),
+  _CmdData(title: '重启到 Bootloader 模式', command: 'fastboot reboot bootloader',
+    copyCommand: 'fastboot reboot bootloader', icon: Icons.developer_mode_rounded, color: AppTheme.textMuted),
+  _CmdData(title: '重启到 Fastboot 模式', command: 'fastboot reboot fastboot',
+    copyCommand: 'fastboot reboot fastboot', icon: Icons.flash_on_rounded, color: AppTheme.primary),
+  _CmdData(title: '解锁 Bootloader', command: 'fastboot flashing unlock',
+    copyCommand: 'fastboot flashing unlock', icon: Icons.lock_open_rounded, color: AppTheme.danger),
+  _CmdData(title: '回锁 Bootloader', command: 'fastboot flashing lock',
+    copyCommand: 'fastboot flashing lock', icon: Icons.lock_rounded, color: AppTheme.warning),
+  _CmdData(title: '刷写分区', command: 'fastboot flash ',
+    copyCommand: 'fastboot flash', icon: Icons.system_update_rounded, color: AppTheme.primary),
+  _CmdData(title: '擦除分区', command: 'fastboot erase ',
+    copyCommand: 'fastboot erase', icon: Icons.delete_forever_rounded, color: AppTheme.danger),
+  _CmdData(title: '查看设备所有变量', command: 'fastboot getvar all',
+    copyCommand: 'fastboot getvar all', icon: Icons.info_outline_rounded, color: AppTheme.textSecondary),
+  _CmdData(title: '列出已连接设备', command: 'fastboot devices',
+    copyCommand: 'fastboot devices', icon: Icons.usb_rounded, color: AppTheme.success),
+  _CmdData(title: '刷入 boot.img', command: 'fastboot flash boot ',
+    copyCommand: 'fastboot flash boot', icon: Icons.memory_rounded, color: AppTheme.primary),
+  _CmdData(title: '刷入 recovery.img', command: 'fastboot flash recovery ',
+    copyCommand: 'fastboot flash recovery', icon: Icons.health_and_safety_outlined, color: AppTheme.primary),
+  _CmdData(title: '刷入 vbmeta（禁用校验）',
+    command: 'fastboot flash vbmeta --disable-verity --disable-verification ',
+    copyCommand: 'fastboot flash vbmeta --disable-verity --disable-verification',
+    icon: Icons.verified_user_outlined, color: AppTheme.warning),
+  _CmdData(title: '擦除 userdata', command: 'fastboot erase userdata',
+    copyCommand: 'fastboot erase userdata', icon: Icons.delete_outline_rounded, color: AppTheme.danger),
+  _CmdData(title: '擦除 cache', command: 'fastboot erase cache',
+    copyCommand: 'fastboot erase cache', icon: Icons.cleaning_services_rounded, color: AppTheme.warning),
+  _CmdData(title: '格式化 userdata', command: 'fastboot format userdata',
+    copyCommand: 'fastboot format userdata', icon: Icons.format_color_reset_rounded, color: AppTheme.danger),
+  _CmdData(title: '设置活跃槽位为 a', command: 'fastboot set_active a',
+    copyCommand: 'fastboot set_active a', icon: Icons.swap_horiz_rounded, color: AppTheme.textSecondary),
+  _CmdData(title: '设置活跃槽位为 b', command: 'fastboot set_active b',
+    copyCommand: 'fastboot set_active b', icon: Icons.swap_horiz_rounded, color: AppTheme.textSecondary),
+  _CmdData(title: '查看电池电量', command: 'fastboot getvar battery-voltage',
+    copyCommand: 'fastboot getvar battery-voltage', icon: Icons.battery_full_rounded, color: AppTheme.success),
+  _CmdData(title: '查看 bootloader 锁定状态', command: 'fastboot getvar unlocked',
+    copyCommand: 'fastboot getvar unlocked', icon: Icons.security_rounded, color: AppTheme.textSecondary),
+];
+
+// ── 快捷命令条目 ───────────────────────────────────────────────────────────────
+
+class _QuickCmdTile extends StatelessWidget {
+  final String title;
+  final String command;
+  final String copyCommand;
+  final IconData icon;
+  final Color iconColor;
+  final VoidCallback onFill;
+
+  const _QuickCmdTile({
+    required this.title, required this.command, required this.copyCommand,
+    required this.icon, required this.iconColor, required this.onFill,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onFill,
+      borderRadius: BorderRadius.circular(14),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+        child: Row(children: [
+          Container(
+            width: 34, height: 34,
+            decoration: BoxDecoration(
+              color: iconColor.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(icon, size: 17, color: iconColor),
+          ),
+          const SizedBox(width: 12),
+          Expanded(child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: const TextStyle(
+                fontFamily: 'SpaceMono', fontSize: 12,
+                fontWeight: FontWeight.w600, color: AppTheme.textPrimary,
+              )),
+              const SizedBox(height: 2),
+              Text(copyCommand, style: const TextStyle(
+                fontFamily: 'JetBrainsMono', fontSize: 10, color: AppTheme.textMuted,
+              ), maxLines: 1, overflow: TextOverflow.ellipsis),
+            ],
+          )),
+          _CopyBtn(text: copyCommand),
+        ]),
+      ),
+    );
+  }
+}
+
+// ── 复制按钮 ───────────────────────────────────────────────────────────────────
+
+class _CopyBtn extends StatefulWidget {
+  final String text;
+  const _CopyBtn({required this.text});
+  @override
+  State<_CopyBtn> createState() => _CopyBtnState();
+}
+
+class _CopyBtnState extends State<_CopyBtn> {
+  bool _copied = false;
+
+  Future<void> _copy() async {
+    await Clipboard.setData(ClipboardData(text: widget.text));
+    setState(() => _copied = true);
+    await Future.delayed(const Duration(seconds: 2));
+    if (mounted) setState(() => _copied = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: _copy,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: BoxDecoration(
+          color: _copied ? AppTheme.success.withOpacity(0.12) : AppTheme.bg3.withOpacity(0.5),
+          borderRadius: BorderRadius.circular(7),
+        ),
+        child: Icon(
+          _copied ? Icons.check_rounded : Icons.copy_rounded,
+          size: 14,
+          color: _copied ? AppTheme.success : AppTheme.textMuted,
+        ),
+      ),
+    );
+  }
+}
+
+// ── 图标按钮 ───────────────────────────────────────────────────────────────────
+
+class _IconBtn extends StatelessWidget {
+  final IconData icon;
+  final String tooltip;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _IconBtn({required this.icon, required this.tooltip, required this.color, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          width: 40, height: 40,
+          decoration: BoxDecoration(
+            color: color.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: color.withOpacity(0.3)),
+          ),
+          child: Icon(icon, size: 18, color: color),
+        ),
+      ),
+    );
+  }
+}
+
+// ── 执行按钮 ───────────────────────────────────────────────────────────────────
+
+class _ExecBtn extends StatelessWidget {
+  final bool busy;
+  final VoidCallback onTap;
+
+  const _ExecBtn({required this.busy, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: busy ? null : onTap,
+      child: Container(
+        height: 40,
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        decoration: BoxDecoration(
+          color: busy ? AppTheme.primary.withOpacity(0.5) : AppTheme.primary,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          if (busy)
+            const SizedBox(width: 13, height: 13,
+              child: CircularProgressIndicator(
+                strokeWidth: 2, valueColor: AlwaysStoppedAnimation(Colors.white),
+              ),
+            )
+          else
+            const Icon(Icons.play_arrow_rounded, size: 18, color: Colors.white),
+          const SizedBox(width: 5),
+          Text(busy ? '执行中' : '执行', style: const TextStyle(
+            fontFamily: 'SpaceMono', fontSize: 12,
+            fontWeight: FontWeight.w700, color: Colors.white,
+          )),
+        ]),
+      ),
+    );
+  }
+}
+
+// ── 设备状态卡片 ───────────────────────────────────────────────────────────────
+
+class _DeviceStatusCard extends StatelessWidget {
+  const _DeviceStatusCard();
+
+  @override
+  Widget build(BuildContext context) {
+    final fb = context.watch<FastbootService>();
+    final connected = fb.deviceConnected;
+
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: AppTheme.bg1,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: connected
+              ? AppTheme.success.withOpacity(0.4)
+              : AppTheme.warning.withOpacity(0.4),
+        ),
+      ),
+      child: Row(children: [
+        Container(
+          width: 38, height: 38,
+          decoration: BoxDecoration(
+            color: connected
+                ? AppTheme.success.withOpacity(0.12)
+                : AppTheme.warning.withOpacity(0.12),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Icon(
+            connected ? Icons.usb_rounded : Icons.usb_off_rounded,
+            size: 20,
+            color: connected ? AppTheme.success : AppTheme.warning,
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              connected ? 'Fastboot 设备已连接' : '未检测到 Fastboot 设备',
+              style: TextStyle(
+                fontFamily: 'SpaceMono', fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: connected ? AppTheme.success : AppTheme.warning,
+              ),
+            ),
+            if (fb.deviceSerial != null) ...[ 
+              const SizedBox(height: 3),
+              Text(fb.deviceSerial!, style: const TextStyle(
+                fontFamily: 'JetBrainsMono', fontSize: 11,
+                color: AppTheme.textMuted,
+              )),
+            ] else ...[ 
+              const SizedBox(height: 3),
+              const Text('通过 USB OTG 连接设备并进入 Fastboot 模式', style: TextStyle(
+                fontFamily: 'JetBrainsMono', fontSize: 11,
+                color: AppTheme.textMuted,
+              )),
+            ],
+          ],
+        )),
+        // 刷新按钮
+        IconButton(
+          icon: const Icon(Icons.refresh_rounded, size: 18, color: AppTheme.textMuted),
+          tooltip: '刷新设备状态',
+          onPressed: () => context.read<FastbootService>().devices(),
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+        ),
+      ]),
     );
   }
 }
