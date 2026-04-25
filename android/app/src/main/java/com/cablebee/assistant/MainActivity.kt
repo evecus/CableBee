@@ -21,6 +21,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        // Initialize persistent RSA key pair for ADB authentication
         AdbBridge.init(applicationContext.filesDir)
 
         // ── USB ───────────────────────────────────────────────────────────
@@ -52,11 +53,15 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
 
+                    // getNativeLibraryDir() → String
+                    // Returns the path where Android extracted our jniLibs .so files.
+                    // BinaryManager uses this to locate libadb.so and libfastboot.so.
                     "getNativeLibraryDir" -> {
                         val dir = applicationInfo.nativeLibraryDir
                         result.success(dir)
                     }
 
+                    // connect(host, port) → serial
                     "connect" -> {
                         val host = call.argument<String>("host") ?: return@setMethodCallHandler result.error("BAD_ARG","host required",null)
                         val port = call.argument<Int>("port") ?: 5555
@@ -67,13 +72,16 @@ class MainActivity : FlutterActivity() {
                         }
                     }
 
+                    // disconnect(serial)
                     "disconnect" -> {
                         val serial = call.argument<String>("serial") ?: return@setMethodCallHandler result.error("BAD_ARG","serial required",null)
                         scope.launch { AdbBridge.disconnect(serial); ui { result.success(null) } }
                     }
 
+                    // devices() → List<String>
                     "devices" -> result.success(AdbBridge.devices())
 
+                    // shell(serial, command, timeoutMs) → String
                     "shell" -> {
                         val serial  = call.argument<String>("serial")  ?: return@setMethodCallHandler result.error("BAD_ARG","serial required",null)
                         val command = call.argument<String>("command") ?: return@setMethodCallHandler result.error("BAD_ARG","command required",null)
@@ -85,6 +93,7 @@ class MainActivity : FlutterActivity() {
                         }
                     }
 
+                    // push(serial, localPath, remotePath) → null or error
                     "push" -> {
                         val serial     = call.argument<String>("serial")     ?: return@setMethodCallHandler result.error("BAD_ARG","serial required",null)
                         val localPath  = call.argument<String>("localPath")  ?: return@setMethodCallHandler result.error("BAD_ARG","localPath required",null)
@@ -99,6 +108,7 @@ class MainActivity : FlutterActivity() {
                         }
                     }
 
+                    // pull(serial, remotePath, localPath) → null or error
                     "pull" -> {
                         val serial     = call.argument<String>("serial")     ?: return@setMethodCallHandler result.error("BAD_ARG","serial required",null)
                         val remotePath = call.argument<String>("remotePath") ?: return@setMethodCallHandler result.error("BAD_ARG","remotePath required",null)
@@ -113,11 +123,13 @@ class MainActivity : FlutterActivity() {
                         }
                     }
 
+                    // pair(host, port, code, adbBinPath) — SPAKE2 via adb binary (one-time)
                     "pair" -> {
                         val host = call.argument<String>("host") ?: return@setMethodCallHandler result.error("BAD_ARG","host required",null)
                         val port = call.argument<Int>("port")    ?: return@setMethodCallHandler result.error("BAD_ARG","port required",null)
                         val code = call.argument<String>("code") ?: return@setMethodCallHandler result.error("BAD_ARG","code required",null)
                         scope.launch {
+                            // libadb.so is the adb binary in jniLibs, already chmod'd by BinaryManager
                             val bin = "${applicationInfo.nativeLibraryDir}/libadb.so"
                             runCatching {
                                 val proc = ProcessBuilder(bin, "pair", "$host:$port")
@@ -148,16 +160,5 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onResume()  { super.onResume(); intent?.let { onNewIntent(it) } }
-
-    // FIX(Bug-D): 原代码在 onDestroy 里调用 AdbBridge.disconnectAll()
-    // 导致 Android 系统因低内存回收再重建 Activity 时，所有连接全断，重建后必须重新授权。
-    // 修复：onDestroy 只取消协程作用域，不断开 ADB 连接。
-    // AdbBridge 是 object 单例，连接会一直保持到进程结束。
-    // 用户主动断开通过 UI 的 disconnect 按钮触发，走 AdbBridge.disconnect() 即可。
-    override fun onDestroy() {
-        scope.cancel()
-        // 注意：不再调用 AdbBridge.disconnectAll()
-        // 连接生命周期与进程绑定，而非与 Activity 绑定
-        super.onDestroy()
-    }
+    override fun onDestroy() { scope.cancel(); AdbBridge.disconnectAll(); super.onDestroy() }
 }
