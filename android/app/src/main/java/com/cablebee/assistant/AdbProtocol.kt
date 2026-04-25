@@ -139,66 +139,61 @@ object AdbCrypto {
     }
 
     /**
-     * Encode the public key in the exact ADB wire format expected by adbd:
-     *   BASE64( AdbRSAPublicKey ) + " CableBee\0"
+     * Encode the public key in the exact ADB wire format expected by adbd.
+     * Strictly follows AOSP platform/system/core/libcrypto_utils/android_pubkey.cpp
      *
-     * AdbRSAPublicKey (little-endian, all fields 32-bit unless noted):
-     *   uint32 len          — number of 32-bit words in the modulus (KEY_LENGTH_WORDS = 64 for 2048-bit)
-     *   uint32 n0inv        — -n[0]^-1 mod 2^32  (Montgomery constant)
-     *   uint32[64] n        — modulus, little-endian words
-     *   uint32[64] rr       — R^2 mod n (Montgomery constant), little-endian words
-     *   uint32 exponent     — public exponent (always 65537)
+     * Wire format: BASE64( AdbRSAPublicKey ) + " CableBee\0"
      *
-     * Reference: platform/system/core/libcrypto_utils/android_pubkey.cpp
+     * AdbRSAPublicKey (all little-endian):
+     *   uint32  len      = KEY_LENGTH_WORDS (64 for RSA-2048)
+     *   uint32  n0inv    = -n[0]^{-1} mod 2^32   (Montgomery param)
+     *   uint32[64] n     = modulus, little-endian 32-bit words
+     *   uint32[64] rr    = R^2 mod n, R = 2^2048  (Montgomery param)
+     *   uint32  exponent = 65537
      */
     fun encodePublicKey(keyPair: KeyPair): ByteArray {
-        val pub = keyPair.public as RSAPublicKey
-        val modulus  = pub.modulus              // BigInteger, positive
-        val exponent = pub.publicExponent.toInt()
+        val pub      = keyPair.public as RSAPublicKey
+        val modulus  = pub.modulus          // positive BigInteger
+        val KEY_WORDS = 64                  // 2048 / 32
+        val KEY_BYTES = KEY_WORDS * 4       // 256
 
-        val KEY_LENGTH_WORDS = 64               // 2048 bits / 32 bits per word
-        val KEY_LENGTH_BYTES = KEY_LENGTH_WORDS * 4
+        // ── n0inv = -n^{-1} mod 2^32 ──────────────────────────────────────
+        // n mod 2^32 is the lowest 32-bit word of the modulus
+        val r32  = java.math.BigInteger.ONE.shiftLeft(32)
+        // modInverse gives n^{-1} mod 2^32; we want its negation mod 2^32
+        val n0inv = r32.subtract(modulus.modInverse(r32)).and(r32.subtract(java.math.BigInteger.ONE))
+            .toLong().toInt()
 
-        // --- n0inv = -n[0]^-1 mod 2^32 ---
-        val r32 = java.math.BigInteger.ONE.shiftLeft(32)
-        val n0  = modulus.mod(r32).toLong()
-        // Modular inverse of n0 mod 2^32
-        var inv = 1L
-        for (i in 1..31) inv = inv * inv * n0 % (1L shl 32) // using Hensel lifting via BigInteger
-        val n0inv = (r32 - modulus.modInverse(r32)).toLong().and(0xFFFFFFFFL).toInt()
+        // ── n[]: modulus as little-endian 32-bit words ─────────────────────
+        fun bigIntToLeWords(bi: java.math.BigInteger): ByteArray {
+            val out  = ByteArray(KEY_BYTES)
+            // toByteArray() is big-endian, may have leading 0x00
+            val be   = bi.toByteArray()
+            val trim = if (be[0] == 0.toByte()) be.copyOfRange(1, be.size) else be
+            // copy right-aligned into out, then reverse for little-endian
+            val copy = minOf(trim.size, KEY_BYTES)
+            System.arraycopy(trim, trim.size - copy, out, 0, copy)
+            out.reverse()
+            return out
+        }
 
-        // --- n[]: modulus in little-endian 32-bit words ---
-        val nBytes = ByteArray(KEY_LENGTH_BYTES)
-        val modBytes = modulus.toByteArray()
-        // modBytes may have a leading 0x00 sign byte — strip it
-        val stripped = if (modBytes[0] == 0.toByte()) modBytes.copyOfRange(1, modBytes.size) else modBytes
-        // Copy big-endian bytes into nBytes reversed (little-endian)
-        val srcStart = maxOf(0, stripped.size - KEY_LENGTH_BYTES)
-        val dstStart = KEY_LENGTH_BYTES - (stripped.size - srcStart)
-        System.arraycopy(stripped, srcStart, nBytes, dstStart, stripped.size - srcStart)
-        nBytes.reverse()  // now little-endian
+        val nBytes  = bigIntToLeWords(modulus)
 
-        // --- rr[]: R^2 mod n, where R = 2^(KEY_LENGTH_WORDS*32) ---
-        val R   = java.math.BigInteger.ONE.shiftLeft(KEY_LENGTH_WORDS * 32)
-        val rr  = R.multiply(R).mod(modulus)
-        val rrBytes = ByteArray(KEY_LENGTH_BYTES)
-        val rrRaw = rr.toByteArray()
-        val rrStripped = if (rrRaw[0] == 0.toByte()) rrRaw.copyOfRange(1, rrRaw.size) else rrRaw
-        val rSrcStart = maxOf(0, rrStripped.size - KEY_LENGTH_BYTES)
-        val rDstStart = KEY_LENGTH_BYTES - (rrStripped.size - rSrcStart)
-        System.arraycopy(rrStripped, rSrcStart, rrBytes, rDstStart, rrStripped.size - rSrcStart)
-        rrBytes.reverse()  // little-endian
+        // ── rr[]: R^2 mod n, R = 2^(KEY_WORDS*32) = 2^2048 ───────────────
+        val R  = java.math.BigInteger.ONE.shiftLeft(KEY_WORDS * 32)
+        val rr = R.multiply(R).mod(modulus)
+        val rrBytes = bigIntToLeWords(rr)
 
-        // --- Assemble struct ---
-        val buf = java.nio.ByteBuffer.allocate(4 + 4 + KEY_LENGTH_BYTES + KEY_LENGTH_BYTES + 4)
+        // ── Assemble struct ────────────────────────────────────────────────
+        val buf = java.nio.ByteBuffer.allocate(4 + 4 + KEY_BYTES + KEY_BYTES + 4)
             .order(java.nio.ByteOrder.LITTLE_ENDIAN)
-        buf.putInt(KEY_LENGTH_WORDS)
+        buf.putInt(KEY_WORDS)
         buf.putInt(n0inv)
         buf.put(nBytes)
         buf.put(rrBytes)
-        buf.putInt(exponent)
+        buf.putInt(pub.publicExponent.toInt())
 
-        val b64 = Base64.encodeToString(buf.array(), Base64.NO_WRAP)
+        val b64 = android.util.Base64.encodeToString(buf.array(), android.util.Base64.NO_WRAP)
         return "$b64 CableBee\u0000".toByteArray(Charsets.UTF_8)
     }
 }
