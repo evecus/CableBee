@@ -220,19 +220,125 @@ class AdbService extends ChangeNotifier {
   // ── 设备信息 ──────────────────────────────────────────────────────────────
 
   Future<Map<String, String>> getDeviceInfo() async {
+    const sep = '<<<SEP>>>';
     final result = await shell(
-      'getprop ro.product.model; echo "---";'
-      'getprop ro.build.version.release; echo "---";'
-      'getprop ro.build.version.sdk; echo "---";'
-      'getprop ro.product.manufacturer; echo "---";'
-      'cat /proc/meminfo | grep MemTotal; echo "---";'
-      'getprop ro.serialno',
+      'getprop ro.product.model; echo "$sep";'
+      'getprop ro.product.brand; echo "$sep";'
+      'getprop ro.product.manufacturer; echo "$sep";'
+      'getprop ro.board.platform; echo "$sep";'
+      'getprop ro.product.cpu.abi; echo "$sep";'
+      'cat /proc/cpuinfo | grep -m1 "^processor" | wc -l; echo "$sep";'
+      'wm size; echo "$sep";'
+      'wm density; echo "$sep";'
+      'cat /proc/meminfo | grep MemTotal; echo "$sep";'
+      'df /data | tail -1; echo "$sep";'
+      'dumpsys battery | grep level; echo "$sep";'
+      'dumpsys battery | grep voltage; echo "$sep";'
+      'dumpsys battery | grep temperature; echo "$sep";'
+      'dumpsys battery | grep present; echo "$sep";'
+      'getprop ro.build.version.release; echo "$sep";'
+      'getprop ro.build.version.sdk; echo "$sep";'
+      'getprop ro.build.version.security_patch; echo "$sep";'
+      'uname -r; echo "$sep";'
+      'getprop ro.serialno; echo "$sep";'
+      'ip addr show wlan0 | grep "inet "; echo "$sep";'
+      'cat /sys/class/net/wlan0/address; echo "$sep";'
+      'settings get secure android_id',
     );
-    final p = result.stdout.split('---');
-    String at(int i) => i < p.length ? p[i].trim() : '';
+    final parts = result.stdout.split(sep);
+    String at(int i) => i < parts.length ? parts[i].trim() : '';
+
+    // 分辨率解析: "Physical size 1080x2400"
+    String resolution = '无';
+    final sizeRaw = at(6);
+    final sizeMatch = RegExp(r'(\d+x\d+)').firstMatch(sizeRaw);
+    if (sizeMatch != null) resolution = sizeMatch.group(1)!;
+
+    // DPI解析: "Physical density 420"
+    String dpi = '无';
+    final dpiRaw = at(7);
+    final dpiMatch = RegExp(r'(\d+)').firstMatch(dpiRaw);
+    if (dpiMatch != null) dpi = '${dpiMatch.group(1)!} dpi';
+
+    // 内存解析: "MemTotal: 3821568 kB"
+    String memory = '无';
+    final memMatch = RegExp(r'(\d+)\s*kB').firstMatch(at(8));
+    if (memMatch != null) {
+      final kb = int.tryParse(memMatch.group(1)!) ?? 0;
+      memory = '${(kb / 1024 / 1024).toStringAsFixed(1)} GB';
+    }
+
+    // 存储解析: df 输出
+    String storageTotal = '无', storageFree = '无';
+    final dfParts = at(9).trim().split(RegExp(r'\s+'));
+    if (dfParts.length >= 4) {
+      int? parseK(String s) => int.tryParse(s.replaceAll(RegExp(r'[^\d]'), ''));
+      final total = parseK(dfParts[1]);
+      final avail = parseK(dfParts.length >= 4 ? dfParts[3] : '');
+      if (total != null) storageTotal = '${(total / 1024 / 1024).toStringAsFixed(1)} GB';
+      if (avail != null) storageFree = '${(avail / 1024 / 1024).toStringAsFixed(1)} GB';
+    }
+
+    // 电池
+    String batteryLevel = '无', batteryVolt = '无', batteryTemp = '无';
+    final battPresent = at(13);
+    final hasBattery = !battPresent.contains('false');
+    if (hasBattery) {
+      final lvlMatch = RegExp(r'level:\s*(\d+)').firstMatch(at(10));
+      if (lvlMatch != null) batteryLevel = '${lvlMatch.group(1)!}%';
+      final voltMatch = RegExp(r'voltage:\s*(\d+)').firstMatch(at(11));
+      if (voltMatch != null) {
+        final mv = int.tryParse(voltMatch.group(1)!) ?? 0;
+        batteryVolt = mv > 1000 ? '${(mv / 1000).toStringAsFixed(2)} V' : '$mv mV';
+      }
+      final tempMatch = RegExp(r'temperature:\s*(\d+)').firstMatch(at(12));
+      if (tempMatch != null) {
+        final t = int.tryParse(tempMatch.group(1)!) ?? 0;
+        batteryTemp = '${(t / 10).toStringAsFixed(1)} °C';
+      }
+    }
+
+    // IP 地址解析: "    inet 192.168.1.x/24 brd ..."
+    String ipAddr = '无';
+    final ipMatch = RegExp(r'inet\s+([\d.]+)').firstMatch(at(19));
+    if (ipMatch != null) ipAddr = ipMatch.group(1)!;
+
+    // MAC
+    String mac = at(20).trim();
+    if (mac.isEmpty || mac.contains('Permission') || mac == '02:00:00:00:00:00') mac = '无';
+
+    // 核心数
+    String cores = at(5).trim();
+    if (cores.isEmpty || cores == '0') {
+      // fallback: nproc
+      final np = await shell('nproc');
+      cores = np.stdout.trim();
+    }
+    if (cores.isNotEmpty && cores != '0') cores = '$cores 核';
+
     return {
-      'model': at(0), 'android': at(1), 'sdk': at(2),
-      'manufacturer': at(3), 'memory': at(4), 'serial': at(5),
+      'model':           at(0).isEmpty ? '无' : at(0),
+      'brand':           at(1).isEmpty ? '无' : at(1),
+      'manufacturer':    at(2).isEmpty ? '无' : at(2),
+      'platform':        at(3).isEmpty ? '无' : at(3),
+      'cpu_abi':         at(4).isEmpty ? '无' : at(4),
+      'cpu_cores':       cores.isEmpty ? '无' : cores,
+      'resolution':      resolution,
+      'dpi':             dpi,
+      'memory':          memory,
+      'storage_total':   storageTotal,
+      'storage_free':    storageFree,
+      'battery_level':   batteryLevel,
+      'battery_voltage': batteryVolt,
+      'battery_temp':    batteryTemp,
+      'android':         at(14).isEmpty ? '无' : at(14),
+      'sdk':             at(15).isEmpty ? '无' : at(15),
+      'security_patch':  at(16).isEmpty ? '无' : at(16),
+      'kernel':          at(17).isEmpty ? '无' : at(17),
+      'serial':          at(18).isEmpty ? '无' : at(18),
+      'ip':              ipAddr,
+      'mac':             mac,
+      'android_id':      at(21).isEmpty ? '无' : at(21),
     };
   }
 
