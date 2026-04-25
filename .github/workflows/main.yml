@@ -102,13 +102,22 @@ jobs:
         run: |
           VER="${{ steps.version.outputs.version }}"
           BUILD_DIR="build/app/outputs/flutter-apk"
+          
+          # 使用通配符匹配任何以 app- 开头并以 -release.apk 结尾的文件
+          for apk in "$BUILD_DIR"/app-*-release.apk; do
+            if [ -f "$apk" ]; then
+              # 提取架构信息 (例如从 app-arm64-v8a-release.apk 提取 arm64-v8a)
+              ARCH=$(basename "$apk" | sed 's/app-//;s/-release.apk//')
+              mv "$apk" "$BUILD_DIR/CableBee-${VER}-${ARCH}.apk"
+            fi
+          done
 
+          # 同时也兼容处理默认的不带架构的文件名
           [ -f "$BUILD_DIR/app-release.apk" ] && \
-            mv "$BUILD_DIR/app-release.apk" \
-               "$BUILD_DIR/CableBee-${VER}-arm64.apk"
+            mv "$BUILD_DIR/app-release.apk" "$BUILD_DIR/CableBee-${VER}.apk"
 
           echo "=== Output APKs ==="
-          ls -lh "$BUILD_DIR/"*.apk 2>/dev/null || echo "No APKs found"
+          ls -lh "$BUILD_DIR/"*.apk
 
       # ── Upload artifacts ──────────────────────────────────────────
       - name: Upload APK artifacts
