@@ -222,77 +222,45 @@ class _FastbootScreenState extends State<FastbootScreen> {
                 margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
                 height: 220,
                 decoration: BoxDecoration(
-                  color: const Color(0xFF0D1117),
+                  color: Colors.white,
                   borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: AppTheme.bg3),
+                  border: Border.all(color: const Color(0xFF1A1A1A), width: 1.5),
                 ),
-                child: Column(children: [
-                  Container(
-                    height: 28,
-                    decoration: const BoxDecoration(
-                      color: Color(0xFF161B22),
-                      borderRadius: BorderRadius.vertical(top: Radius.circular(10)),
-                    ),
-                    padding: const EdgeInsets.symmetric(horizontal: 10),
-                    child: Row(children: [
-                      _dot(const Color(0xFFFF5F57)),
-                      const SizedBox(width: 5),
-                      _dot(const Color(0xFFFFBD2E)),
-                      const SizedBox(width: 5),
-                      _dot(const Color(0xFF28C840)),
-                      const Spacer(),
-                      if (_busy)
-                        const SizedBox(width: 10, height: 10,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 1.5,
-                            valueColor: AlwaysStoppedAnimation(AppTheme.primary),
-                          ),
-                        ),
-                      const SizedBox(width: 4),
-                      const Text('fastboot', style: TextStyle(
-                        fontFamily: 'JetBrainsMono', fontSize: 10,
-                        color: Color(0xFF6E7681),
-                      )),
-                    ]),
-                  ),
-                  Expanded(
-                    child: _outputLines.isEmpty
-                        ? const Center(child: Text('等待执行...', style: TextStyle(
-                            fontFamily: 'JetBrainsMono', fontSize: 12,
-                            color: Color(0xFF6E7681),
-                          )))
-                        : ListView.builder(
-                            controller: _scrollCtrl,
-                            padding: const EdgeInsets.all(10),
-                            itemCount: _outputLines.length,
-                            itemBuilder: (_, i) {
-                              final line = _outputLines[i];
-                              final isCmd = line.startsWith('\$');
-                              Color lineColor;
-                              if (isCmd) {
-                                lineColor = AppTheme.primary;
-                              } else if (line.toLowerCase().contains('error') ||
-                                  line.toLowerCase().contains('fail') ||
-                                  line.toLowerCase().contains('failed')) {
-                                lineColor = AppTheme.danger;
-                              } else if (line.toLowerCase().contains('okay') ||
-                                  line.toLowerCase().contains('success') ||
-                                  line.toLowerCase().contains('finished')) {
-                                lineColor = AppTheme.success;
-                              } else {
-                                lineColor = const Color(0xFFE6EDF3);
-                              }
-                              return Padding(
-                                padding: const EdgeInsets.only(bottom: 2),
-                                child: Text(line, style: TextStyle(
-                                  fontFamily: 'JetBrainsMono', fontSize: 12,
-                                  color: lineColor, height: 1.5,
-                                )),
-                              );
-                            },
-                          ),
-                  ),
-                ]),
+                child: _outputLines.isEmpty
+                    ? const Center(child: Text('等待执行...', style: TextStyle(
+                        fontFamily: 'JetBrainsMono', fontSize: 12,
+                        color: Color(0xFFAAAAAA),
+                      )))
+                    : ListView.builder(
+                        controller: _scrollCtrl,
+                        padding: const EdgeInsets.all(10),
+                        itemCount: _outputLines.length,
+                        itemBuilder: (_, i) {
+                          final line = _outputLines[i];
+                          final isCmd = line.startsWith('\$');
+                          Color lineColor;
+                          if (isCmd) {
+                            lineColor = AppTheme.primary;
+                          } else if (line.toLowerCase().contains('error') ||
+                              line.toLowerCase().contains('fail') ||
+                              line.toLowerCase().contains('failed')) {
+                            lineColor = AppTheme.danger;
+                          } else if (line.toLowerCase().contains('okay') ||
+                              line.toLowerCase().contains('success') ||
+                              line.toLowerCase().contains('finished')) {
+                            lineColor = AppTheme.success;
+                          } else {
+                            lineColor = const Color(0xFF1A1A1A);
+                          }
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 2),
+                            child: Text(line, style: TextStyle(
+                              fontFamily: 'JetBrainsMono', fontSize: 12,
+                              color: lineColor, height: 1.5,
+                            )),
+                          );
+                        },
+                      ),
               ),
             ]),
           ),
