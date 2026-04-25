@@ -36,19 +36,16 @@ class BinaryManager extends ChangeNotifier {
 
   Future<void> initialize() async {
     try {
-      // Ask Kotlin for the nativeLibraryDir — it knows via ApplicationInfo
+      // adb 和 fastboot 二进制由 MainActivity 从 assets 解压到 filesDir
+      // 路径和甲壳虫完全一致：/data/user/0/包名/files/adb
       final nativeDir = await _ch.invokeMethod<String>('getNativeLibraryDir');
-      if (nativeDir == null) throw Exception('nativeLibraryDir is null');
+      if (nativeDir == null) throw Exception('getNativeLibraryDir returned null');
 
-      final adb      = File('$nativeDir/libadb.so');
-      final fastboot = File('$nativeDir/libfastboot.so');
+      final adb      = File('$nativeDir/adb');
+      final fastboot = File('$nativeDir/fastboot');
 
-      // chmod +x — jniLibs are extracted as 644 by Android, need +x to execute
-      await _chmod(adb.path);
-      await _chmod(fastboot.path);
-
-      if (!await adb.exists())      throw Exception('libadb.so not found in $nativeDir');
-      if (!await fastboot.exists()) throw Exception('libfastboot.so not found in $nativeDir');
+      if (!await adb.exists())      throw Exception('adb not found in $nativeDir');
+      if (!await fastboot.exists()) throw Exception('fastboot not found in $nativeDir');
 
       _adbPath      = adb.path;
       _fastbootPath = fastboot.path;

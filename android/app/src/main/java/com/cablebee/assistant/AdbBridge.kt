@@ -233,10 +233,10 @@ class AdbConnection private constructor(
         runCatching { socket.close() }
     }
 
-    /** 通过发送一个无害的空 shell 命令来探测连接是否真正存活 */
+    /** 检查 socket 是否仍然存活（不看 connected 标志，只看底层 socket） */
     fun isAlive(): Boolean {
         return try {
-            !socket.isClosed && socket.isConnected && connected.get()
+            !socket.isClosed && socket.isConnected
         } catch (e: Exception) {
             false
         }
