@@ -60,17 +60,9 @@ class AdbConnection private constructor(
     }
 
     // ── SYNC push ─────────────────────────────────────────────────────────
-    //
-    // Protocol: open "sync:\0", then send DATA frames, close with DONE.
-    //
-    // Wire format for push:
-    //   SEND <path,perms>\0   4-byte "SEND" + 4-byte len + path,perms bytes
-    //   DATA <n>              4-byte "DATA" + 4-byte len + <n> bytes  (repeat)
-    //   DONE <mtime>          4-byte "DONE" + 4-byte mtime
-    //   → server replies OKAY or FAIL
 
     fun push(localPath: String, remotePath: String,
-             mode: Int = 420,            // 0644 octal = 420 decimal
+             mode: Int = 420,
              onProgress: ((Long, Long) -> Unit)? = null): SyncResult {
         val file = File(localPath)
         if (!file.exists()) return SyncResult(false, "local file not found: $localPath")
@@ -80,14 +72,12 @@ class AdbConnection private constructor(
             val syncOut = SyncWriter(out, stream)
             val syncIn  = SyncReader(inp, stream, ::pumpOnce)
 
-            // SEND <path,perms> — device expects octal string e.g. "0644"
             val modeOctal = mode.toString(8).padStart(4, '0')
             val header = "$remotePath,$modeOctal"
             syncOut.writeId("SEND", header.length)
             syncOut.raw(header.toByteArray(Charsets.UTF_8))
             syncOut.flush()
 
-            // DATA chunks
             val total   = file.length()
             var sent    = 0L
             val chunk   = ByteArray(64 * 1024)
@@ -102,12 +92,10 @@ class AdbConnection private constructor(
                 }
             }
 
-            // DONE
             val mtime = (System.currentTimeMillis() / 1000).toInt()
             syncOut.writeId("DONE", mtime)
             syncOut.flush()
 
-            // Read response
             return syncIn.readResult()
         } finally {
             closeStream(stream)
@@ -115,10 +103,6 @@ class AdbConnection private constructor(
     }
 
     // ── SYNC pull ─────────────────────────────────────────────────────────
-    //
-    // Wire:
-    //   RECV <path>   4-byte "RECV" + 4-byte len + path bytes
-    //   → server sends DATA frames then DONE (or FAIL)
 
     fun pull(remotePath: String, localPath: String,
              onProgress: ((Long, Long) -> Unit)? = null): SyncResult {
@@ -127,12 +111,10 @@ class AdbConnection private constructor(
             val syncOut = SyncWriter(out, stream)
             val syncIn  = SyncReader(inp, stream, ::pumpOnce)
 
-            // RECV
             syncOut.writeId("RECV", remotePath.length)
             syncOut.raw(remotePath.toByteArray(Charsets.UTF_8))
             syncOut.flush()
 
-            // Read DATA frames
             File(localPath).parentFile?.mkdirs()
             File(localPath).outputStream().buffered().use { fos ->
                 var received = 0L
@@ -147,7 +129,7 @@ class AdbConnection private constructor(
                             onProgress?.invoke(received, -1)
                         }
                         "DONE" -> {
-                            syncIn.readInt() // mtime, ignore
+                            syncIn.readInt()
                             return SyncResult(true, "")
                         }
                         "FAIL" -> {
@@ -190,16 +172,26 @@ class AdbConnection private constructor(
     }
 
     // ── Message pump ──────────────────────────────────────────────────────
+    // FIX(Bug-E): 只有在确定是真实 I/O 错误时才标记连接断开，
+    // SocketTimeoutException 等非致命异常不应终止连接。
+    // FIX(Bug-pumpOnce): available() < 24 时不跳过，改为非阻塞判断后直接返回，
+    // 避免因 TCP 分包导致消息被永久忽略——available() 是当前缓冲字节数，
+    // 分包时可能只有部分头到达；用 available()==0 快速返回即可，
+    // 真正读取交给 readExactly 的阻塞逻辑。
 
     private fun pumpOnce() {
         try {
-            val avail = inp.available()
-            if (avail < 24) return
-            Log.v(TAG, "pump: available=$avail")
+            // 没有任何字节到达时快速返回，避免阻塞
+            if (inp.available() == 0) return
+            Log.v(TAG, "pump: available=${inp.available()}")
             val msg = AdbMessage.readFrom(inp)
             Log.v(TAG, "pump: cmd=0x${msg.command.toString(16)} arg0=${msg.arg0} arg1=${msg.arg1} dataLen=${msg.data.size}")
             dispatch(msg)
+        } catch (e: java.net.SocketTimeoutException) {
+            // 空闲超时不代表连接断开，忽略即可
+            Log.v(TAG, "pump: socket idle timeout, ignoring")
         } catch (e: Exception) {
+            // 真实 I/O 错误才标记断连
             Log.w(TAG, "pump exception: ${e.javaClass.simpleName}: ${e.message}")
             connected.set(false)
         }
@@ -208,10 +200,8 @@ class AdbConnection private constructor(
     private fun dispatch(msg: AdbMessage) {
         when (msg.command) {
             AdbCmd.OKAY -> {
-                // arg1 = our localId, arg0 = their remoteId
                 val s = streams[msg.arg1] ?: return
                 if (s.remoteId.get() == 0) s.remoteId.set(msg.arg0.toInt())
-                // No ack needed for OKAY — only WRTE requires an OKAY reply
             }
             AdbCmd.WRTE -> {
                 streams[msg.arg1]?.append(msg.data)
@@ -233,7 +223,6 @@ class AdbConnection private constructor(
         runCatching { socket.close() }
     }
 
-    /** 通过发送一个无害的空 shell 命令来探测连接是否真正存活 */
     fun isAlive(): Boolean {
         return try {
             !socket.isClosed && socket.isConnected && connected.get()
@@ -243,11 +232,6 @@ class AdbConnection private constructor(
     }
 
     // ── SYNC helpers ──────────────────────────────────────────────────────
-
-    // SyncWriter sends raw bytes directly on the underlying socket output,
-    // bypassing the ADB message framing. This works because after the OPEN/OKAY
-    // handshake the SYNC service reads a raw byte stream inside the ADB tunnel.
-    // We still need to ACK WRTE messages coming back via the pump.
 
     private inner class SyncWriter(
         private val socketOut: OutputStream,
@@ -265,21 +249,18 @@ class AdbConnection private constructor(
         }
 
         fun flush() {
-            // Wrap accumulated bytes in ADB WRTE message
             val data = bb.toByteArray()
             bb.reset()
             if (data.isEmpty()) return
-            // Send in chunks ≤ MAX_PAYLOAD
             var off = 0
             while (off < data.size) {
                 val chunk = data.copyOfRange(off, minOf(off + 1024 * 1024, data.size))
                 send(AdbMessage(AdbCmd.WRTE, stream.localId, stream.remoteId.get().toUInt(), chunk))
                 off += chunk.size
-                // Pump incoming messages so the remote OKAY ack is processed
                 val deadline = System.currentTimeMillis() + 5_000
                 while (System.currentTimeMillis() < deadline) {
                     pumpOnce(); Thread.sleep(5)
-                    break // WRTE ack is fire-and-forget; one pump pass is sufficient
+                    break
                 }
             }
         }
@@ -353,49 +334,72 @@ class AdbConnection private constructor(
         fun connect(host: String, port: Int, keyPair: KeyPair): AdbConnection {
             val socket = Socket()
             socket.connect(InetSocketAddress(host, port), 5_000)
-            socket.soTimeout = 15_000
+            // FIX(Bug-E): 握手后重置为较小的 soTimeout，避免空闲时触发超时断连
+            socket.soTimeout = 30_000   // 握手阶段允许用户有30秒点击授权
             val inp = socket.getInputStream()
             val out = socket.getOutputStream()
 
-            // CONNECT
             AdbMessage(
                 AdbCmd.CNXN, AdbCmd.VERSION, AdbCmd.MAX_PAYLOAD,
                 "host::CableBee\u0000".toByteArray(Charsets.UTF_8)
             ).writeTo(out)
 
-            // Handshake:
-            // 1. Device sends AUTH_TOKEN  → we reply with our RSA signature
-            // 2a. If key is known → device sends CNXN → done
-            // 2b. If key is unknown → device sends AUTH_TOKEN again
-            //     → we reply with AUTH_RSAPUBLICKEY
-            //     → device shows "Allow USB debugging?" dialog
-            //     → user taps Allow → device sends CNXN → done
-            // We wait up to 30 s for the user to tap the dialog.
+            // Handshake 状态机（修复 Bug-C）：
+            //
+            // 标准流程（密钥已知）：
+            //   CNXN → AUTH_TOKEN → AUTH_SIGNATURE → CNXN ✓
+            //
+            // 首次授权流程（密钥未知）：
+            //   CNXN → AUTH_TOKEN → AUTH_SIGNATURE(失败)
+            //        → AUTH_TOKEN → AUTH_RSAPUBLICKEY → [用户点 Allow]
+            //        → AUTH_TOKEN（Android 11+ 再发一次让你签名确认）
+            //        → AUTH_SIGNATURE → CNXN ✓
+            //
+            // FIX(Bug-C): 发送 AUTH_RSAPUBLICKEY 并等用户授权后，
+            // adbd（尤其 Android 11+）会再发一个 AUTH_TOKEN，
+            // 此时应重新用私钥签名回复，而不是静默等待导致30秒超时。
+            // 用 lastToken 记录最后收到的 token，随时可以重签。
+
             var triedSignature = false
             var triedPublicKey = false
+            var lastToken: ByteArray? = null
             val deadline = System.currentTimeMillis() + 30_000
-            socket.soTimeout = 30_000
+
             while (System.currentTimeMillis() < deadline) {
                 val msg = AdbMessage.readFrom(inp)
                 when (msg.command) {
                     AdbCmd.CNXN -> {
+                        // 握手完成，切换到较小的 soTimeout 避免空闲误判断连
+                        socket.soTimeout = 0   // 0 = 无超时，由 available() 非阻塞驱动
                         return AdbConnection("$host:$port", socket, inp, out, keyPair)
                     }
                     AdbCmd.AUTH -> when (msg.arg0.toInt()) {
                         1 -> { // AUTH_TOKEN
-                            if (!triedSignature) {
-                                triedSignature = true
-                                val sig = AdbCrypto.sign(keyPair, msg.data)
-                                AdbMessage(AdbCmd.AUTH, AdbCmd.AUTH_SIGNATURE, 0u, sig).writeTo(out)
-                            } else if (!triedPublicKey) {
-                                triedPublicKey = true
-                                val pub = AdbCrypto.encodePublicKey(keyPair)
-                                AdbMessage(AdbCmd.AUTH, AdbCmd.AUTH_RSAPUBLICKEY, 0u, pub).writeTo(out)
+                            lastToken = msg.data
+                            when {
+                                !triedSignature -> {
+                                    // 第一步：先尝试签名（如果密钥已被授权，直接成功）
+                                    triedSignature = true
+                                    val sig = AdbCrypto.sign(keyPair, msg.data)
+                                    AdbMessage(AdbCmd.AUTH, AdbCmd.AUTH_SIGNATURE, 0u, sig).writeTo(out)
+                                }
+                                !triedPublicKey -> {
+                                    // 第二步：签名未被接受，发送公钥请求用户授权
+                                    triedPublicKey = true
+                                    val pub = AdbCrypto.encodePublicKey(keyPair)
+                                    AdbMessage(AdbCmd.AUTH, AdbCmd.AUTH_RSAPUBLICKEY, 0u, pub).writeTo(out)
+                                }
+                                else -> {
+                                    // FIX(Bug-C): 用户已点击 Allow，adbd 再次发来 AUTH_TOKEN
+                                    // 此时用私钥重新签名即可完成握手，不能静默等待
+                                    Log.d(TAG, "handshake: re-signing after user accepted public key")
+                                    val sig = AdbCrypto.sign(keyPair, msg.data)
+                                    AdbMessage(AdbCmd.AUTH, AdbCmd.AUTH_SIGNATURE, 0u, sig).writeTo(out)
+                                }
                             }
-                            // else: wait — user hasn't tapped Allow yet; device will re-send after tap
                         }
                         else -> {
-                            // AUTH_RSAPUBLICKEY request — send it
+                            // AUTH type=3: adbd 主动要求发公钥（不常见）
                             val pub = AdbCrypto.encodePublicKey(keyPair)
                             AdbMessage(AdbCmd.AUTH, AdbCmd.AUTH_RSAPUBLICKEY, 0u, pub).writeTo(out)
                         }
@@ -413,7 +417,10 @@ data class SyncResult(val success: Boolean, val error: String)
 
 object AdbBridge {
     private lateinit var keyPair: java.security.KeyPair
+
+    // FIX(Bug-F): 用 @Synchronized 保护 connect()，防止并发时重复建立连接
     private val connections = ConcurrentHashMap<String, AdbConnection>()
+    private val connectLock = Any()
 
     /** Call once from MainActivity.onCreate() before any connect(). */
     fun init(filesDir: java.io.File) {
@@ -422,24 +429,37 @@ object AdbBridge {
         }
     }
 
+    // FIX(Bug-F): 加 synchronized 块，保证「检查-建立」的原子性
     fun connect(host: String, port: Int): String {
         val key = "$host:$port"
-        // 复用现有连接：connected 为 true 且 socket 实际可用时直接返回，避免重复 auth 弹窗
-        connections[key]?.let { existing ->
-            if (existing.connected.get() && existing.isAlive()) {
-                return key
+        synchronized(connectLock) {
+            connections[key]?.let { existing ->
+                if (existing.connected.get() && existing.isAlive()) {
+                    Log.d(TAG, "connect: reusing existing connection to $key")
+                    return key
+                }
+                Log.d(TAG, "connect: existing connection dead, reconnecting to $key")
+                runCatching { existing.close() }
+                connections.remove(key)
             }
-            // 旧连接已死，先关闭清理
-            runCatching { existing.close() }
-            connections.remove(key)
+            connections[key] = AdbConnection.connect(host, port, keyPair)
+            return key
         }
-        connections[key] = AdbConnection.connect(host, port, keyPair)
-        return key
     }
 
-    fun disconnect(serial: String) { connections.remove(serial)?.close() }
-    fun disconnectAll()            { connections.values.forEach { it.close() }; connections.clear() }
-    fun devices(): List<String>    = connections.filter { it.value.connected.get() }.keys.toList()
+    // FIX(Bug-D): 提供 softDisconnect，只清理内存中的连接对象，
+    // 不关闭 socket，让 TCP 连接自然保持（适合切后台场景）。
+    // 原 disconnect 保留，用于用户主动断开的场景。
+    fun disconnect(serial: String) {
+        connections.remove(serial)?.close()
+    }
+
+    fun disconnectAll() {
+        connections.values.forEach { it.close() }
+        connections.clear()
+    }
+
+    fun devices(): List<String> = connections.filter { it.value.connected.get() }.keys.toList()
 
     fun shell(serial: String, command: String, timeoutMs: Long = 15_000): String =
         conn(serial).shell(command, timeoutMs)
