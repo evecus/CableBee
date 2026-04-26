@@ -187,7 +187,7 @@ class AdbService extends ChangeNotifier {
   // ── 文件列表 ──────────────────────────────────────────────────────────────
 
   Future<List<FileEntry>> listFiles(String path) async {
-    // 末尾加 / 强制把符号链接当目录处理，等同于进入链接目标
+    // 末尾加 / 强制跟随符号链接（ls 把 /sdcard 当目录而非链接处理）
     final safePath = path.endsWith('/') ? path : '$path/';
     final result = await shell('ls -la "$safePath" 2>&1');
     return result.stdout
@@ -205,7 +205,7 @@ class AdbService extends ChangeNotifier {
     return result.stdout.split('\n')
         .where((l) => l.startsWith('package:'))
         .map((l) {
-          final raw = l.substring(8); // 去掉 'package:'
+          final raw = l.substring(8);
           final eqIdx = raw.lastIndexOf('=');
           if (eqIdx <= 0) return null;
           final apkPath = raw.substring(0, eqIdx).trim();
@@ -382,47 +382,52 @@ class AdbService extends ChangeNotifier {
 
   // ── 工具方法 ──────────────────────────────────────────────────────────────
 
+
   // ── 应用标签与图标 ──────────────────────────────────────────────────────────
 
-  /// 批量获取应用标签。优先用 cmd package --show-labels，失败则用 dumpsys。
+  /// 批量获取应用标签。
+  /// 策略：① cmd package --show-labels  ② dumpsys package nonLocalizedLabel
   Future<Map<String, String>> getAppLabels(List<String> packages) async {
     final labelMap = <String, String>{};
 
-    // 方案一：cmd package list packages --show-labels（Android 8+）
+    // 方案一
     try {
       final res = await shell('cmd package list packages --show-labels 2>&1');
       if (res.isSuccess && res.stdout.contains('label:')) {
         for (final line in res.stdout.split('\n')) {
-          final pkgMatch = RegExp(r'package:(\S+)').firstMatch(line);
-          final lblMatch = RegExp(r'label:(.+)$').firstMatch(line);
-          if (pkgMatch != null && lblMatch != null) {
-            final pkg = pkgMatch.group(1)!.trim();
-            final lbl = lblMatch.group(1)!.trim();
-            if (lbl.isNotEmpty && !lbl.startsWith('@')) labelMap[pkg] = lbl;
+          final pm = RegExp(r'package:(\S+)').firstMatch(line);
+          final lm = RegExp(r'label:(.+)$').firstMatch(line);
+          if (pm != null && lm != null) {
+            final lbl = lm.group(1)!.trim();
+            if (lbl.isNotEmpty && !lbl.startsWith('@')) {
+              labelMap[pm.group(1)!.trim()] = lbl;
+            }
           }
         }
         if (labelMap.length > packages.length ~/ 2) return labelMap;
       }
     } catch (_) {}
 
-    // 方案二：dumpsys package 逐个解析 nonLocalizedLabel（每批 8 个）
+    // 方案二：每批 8 个，用 echo 分隔输出
     const batchSize = 8;
     for (var i = 0; i < packages.length; i += batchSize) {
       final batch = packages.skip(i).take(batchSize).toList();
       final cmd = batch
-          .map((p) => 'echo "PKG:$p"; dumpsys package $p 2>/dev/null | grep -m1 nonLocalizedLabel')
+          .map((p) => 'echo "##PKG:$p##"; dumpsys package $p 2>/dev/null | grep -m1 nonLocalizedLabel')
           .join('; ');
       try {
-        final res = await shell(cmd, timeoutMs: 20000);
-        String? currentPkg;
+        final res = await shell(cmd, timeoutMs: 30000);
+        String? cur;
         for (final line in res.stdout.split('\n')) {
-          final pkgLine = RegExp(r'^PKG:(.+)$').firstMatch(line.trim());
-          if (pkgLine != null) { currentPkg = pkgLine.group(1)!.trim(); continue; }
-          if (currentPkg != null) {
-            final m = RegExp(r'nonLocalizedLabel=(.+?)(?:\s|$)').firstMatch(line);
-            if (m != null && m.group(1) != 'null' && !m.group(1)!.startsWith('@')) {
-              labelMap[currentPkg] = m.group(1)!.trim();
+          final pm = RegExp(r'##PKG:(.+?)##').firstMatch(line.trim());
+          if (pm != null) { cur = pm.group(1)!.trim(); continue; }
+          if (cur != null) {
+            final m = RegExp(r'nonLocalizedLabel=(\S.+?)(\s|$)').firstMatch(line);
+            if (m != null) {
+              final lbl = m.group(1)!.trim();
+              if (lbl != 'null' && !lbl.startsWith('@')) labelMap[cur] = lbl;
             }
+            cur = null;
           }
         }
       } catch (_) {}
@@ -430,73 +435,62 @@ class AdbService extends ChangeNotifier {
     return labelMap;
   }
 
-  /// 提取单个应用图标（PNG 字节）。
-  /// 原理：通过 aapt/aapt2 读出图标资源路径，再 unzip 从 APK 中提取 PNG 并 base64 编码。
+  /// 提取单个应用图标 PNG 字节（无需 aapt，直接从 APK ZIP 中提取）。
   Future<List<int>?> getAppIcon(String apkPath) async {
-    try {
-      // 1. 用 aapt dump badging 获取图标路径（优先最高密度）
-      final aaptRes = await shell(
-          'aapt dump badging "$apkPath" 2>/dev/null | grep "^application-icon" | tail -1',
-          timeoutMs: 10000);
-      String? iconEntry;
-      if (aaptRes.isSuccess && aaptRes.stdout.isNotEmpty) {
-        final m = RegExp(r"'([^']+\.png)'").firstMatch(aaptRes.stdout.trim());
-        iconEntry = m?.group(1);
-      }
-      // fallback：尝试 aapt2
-      if (iconEntry == null) {
-        final a2 = await shell(
-            'aapt2 dump badging "$apkPath" 2>/dev/null | grep "^application-icon" | tail -1',
-            timeoutMs: 10000);
-        if (a2.isSuccess && a2.stdout.isNotEmpty) {
-          final m = RegExp(r"'([^']+\.png)'").firstMatch(a2.stdout.trim());
-          iconEntry = m?.group(1);
-        }
-      }
-      // 2. 用 unzip + base64 提取图标字节
-      if (iconEntry != null && iconEntry.isNotEmpty) {
-        final b64Res = await shell(
-            'unzip -p "$apkPath" "$iconEntry" 2>/dev/null | base64 -w0',
-            timeoutMs: 10000);
-        if (b64Res.isSuccess && b64Res.stdout.trim().isNotEmpty) {
-          try {
-            // base64 decode
-            final bytes = _decodeBase64(b64Res.stdout.trim());
+    // 尝试常见图标路径（密度从高到低）
+    const densities = ['xxxhdpi-v4','xxhdpi-v4','xhdpi-v4','hdpi-v4','xxxhdpi','xxhdpi','xhdpi','hdpi','mdpi'];
+    const names     = ['ic_launcher','ic_launcher_round','icon','app_icon','ic_launcher_foreground'];
+    const dirs      = ['mipmap','drawable'];
+
+    for (final density in densities) {
+      for (final dir in dirs) {
+        for (final name in names) {
+          final entry = 'res/$dir-$density/$name.png';
+          final res = await shell(
+              'unzip -p "$apkPath" "$entry" 2>/dev/null | base64 -w0',
+              timeoutMs: 8000);
+          if (res.isSuccess && res.stdout.trim().length > 20) {
+            final bytes = _b64decode(res.stdout.trim());
             if (bytes != null && bytes.isNotEmpty) return bytes;
-          } catch (_) {}
+          }
         }
       }
-    } catch (_) {}
+    }
+
+    // 终极 fallback：找 APK 中任意一个 mipmap/drawable PNG
+    final listRes = await shell(
+        'unzip -l "$apkPath" 2>/dev/null | grep -oE "res/(mipmap|drawable)[^[:space:]]+\\.png" | grep -v "foreground\\|background\\|_night" | tail -1',
+        timeoutMs: 5000);
+    final entry = listRes.stdout.trim();
+    if (entry.isNotEmpty) {
+      final res = await shell(
+          'unzip -p "$apkPath" "$entry" 2>/dev/null | base64 -w0',
+          timeoutMs: 8000);
+      if (res.isSuccess && res.stdout.trim().length > 20) {
+        return _b64decode(res.stdout.trim());
+      }
+    }
     return null;
   }
 
-  List<int>? _decodeBase64(String s) {
+  static List<int>? _b64decode(String s) {
     try {
-      // ignore: no_leading_underscores_for_local_identifiers
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+      final lookup = <int, int>{};
+      for (var i = 0; i < chars.length; i++) lookup[chars.codeUnitAt(i)] = i;
       final clean = s.replaceAll(RegExp(r'\s'), '');
-      // Use dart:convert base64Decode
-      return _base64Decode(clean);
+      final out = <int>[];
+      var buf = 0, bits = 0;
+      for (final c in clean.codeUnits) {
+        final v = lookup[c]; if (v == null) continue;
+        buf = (buf << 6) | v; bits += 6;
+        if (bits >= 8) { bits -= 8; out.add((buf >> bits) & 0xff); }
+      }
+      return out.isEmpty ? null : out;
     } catch (_) { return null; }
   }
 
-  List<int> _base64Decode(String s) {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-    final lookup = <int, int>{};
-    for (var i = 0; i < chars.length; i++) lookup[chars.codeUnitAt(i)] = i;
-    final clean = s.replaceAll('=', '');
-    final out = <int>[];
-    var buf = 0, bits = 0;
-    for (final c in clean.codeUnits) {
-      final v = lookup[c];
-      if (v == null) continue;
-      buf = (buf << 6) | v;
-      bits += 6;
-      if (bits >= 8) { bits -= 8; out.add((buf >> bits) & 0xff); }
-    }
-    return out;
-  }
-
-    Future<T?> _invoke<T>(String method, Map<String, dynamic> args) =>
+  Future<T?> _invoke<T>(String method, Map<String, dynamic> args) =>
       _ch.invokeMethod<T>(method, args);
 
   AdbCommandResult _noDevice() =>
@@ -540,29 +534,21 @@ class FileEntry {
     final perms = parts[0];
     if (!perms.startsWith('-') && !perms.startsWith('d') && !perms.startsWith('l')) return null;
 
-    // Android ls -la 列格式: perms [硬链接数] owner group size date time name
-    // 部分 Android ls 没有硬链接数列，通过判断 parts[1] 是否为数字来识别
-    final hasLinkCount = int.tryParse(parts[1]) != null;
-    final off = hasLinkCount ? 1 : 0; // 列偏移量
+    // Android ls -la: perms [硬链接数] owner group size date time name
+    // 部分 Android ls 无硬链接列，通过 parts[1] 是否为纯数字判断
+    final hasLink = int.tryParse(parts[1]) != null;
+    final o = hasLink ? 1 : 0;
+    if (parts.length < 7 + o) return null;
 
-    if (parts.length < 7 + off) return null;
-
-    final size = parts[3 + off];
-    final date = '${parts[4 + off]} ${parts[5 + off]}';
-
-    // 名称部分（可能含空格）；符号链接去掉 " -> target" 后缀
-    final rawName = parts.sublist(6 + off).join(' ');
-    final name = perms.startsWith('l')
-        ? rawName.split(' -> ').first.trim()
-        : rawName;
-
+    final size = parts[3 + o];
+    final date = '${parts[4 + o]} ${parts[5 + o]}';
+    final rawName = parts.sublist(6 + o).join(' ');
+    // 符号链接去掉 " -> target"
+    final name = perms.startsWith('l') ? rawName.split(' -> ').first.trim() : rawName;
     if (name == '.' || name == '..') return null;
     return FileEntry(
-      permissions: perms,
-      isDirectory: perms.startsWith('d'),
-      size: size,
-      date: date,
-      name: name,
+      permissions: perms, isDirectory: perms.startsWith('d'),
+      size: size, date: date, name: name,
     );
   }
 }
