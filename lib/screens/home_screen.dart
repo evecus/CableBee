@@ -41,6 +41,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final _ipCtrl = TextEditingController();
   bool _connecting = false;
   String? _connectMsg;
+  String? _connectingIp; // 正在连接的历史设备 IP
   List<String> _history = [];
 
   @override
@@ -94,11 +95,12 @@ class _HomeScreenState extends State<HomeScreen> {
       host = raw;
     }
 
-    setState(() { _connecting = true; _connectMsg = null; });
+    setState(() { _connecting = true; _connectMsg = null; _connectingIp = '$host:$port'; });
     final result = await context.read<AdbService>().connect(host, port: port);
     final ok = result.isSuccess;
     setState(() {
       _connecting = false;
+      _connectingIp = null;
       _connectMsg = ok ? null : result.stderr;
     });
 
@@ -315,7 +317,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       )
                     : const Icon(Icons.cable_rounded, size: 16),
-                label: Text(_connecting ? '连接中...' : '连接'),
+                label: Text(_connecting ? '等待授权...' : '连接'),
                 style: FilledButton.styleFrom(
                   backgroundColor: AppTheme.primary,
                   foregroundColor: AppTheme.bg0,
@@ -355,14 +357,10 @@ class _HomeScreenState extends State<HomeScreen> {
               icon: Icons.history_rounded,
               iconColor: AppTheme.textMuted,
               title: ip,
-              subtitle: '点击填入输入框',
-              onTap: () {
-                setState(() {
-                  _ipCtrl.text = ip;
-                  _connectMsg = null;
-                });
-              },
-              onDelete: () => _removeHistory(ip),
+              subtitle: _connectingIp == ip ? '等待授权...' : '点击直接连接',
+              connecting: _connectingIp == ip,
+              onTap: _connecting ? null : () => _connect(overrideIp: ip),
+              onDelete: _connecting ? null : () => _removeHistory(ip),
             )),
           ],
 
@@ -504,6 +502,7 @@ class _DeviceCard extends StatelessWidget {
   final String subtitle;
   final String? badge;
   final Color? badgeColor;
+  final bool connecting;
   final VoidCallback? onTap;
   final VoidCallback? onDelete;
 
@@ -511,6 +510,7 @@ class _DeviceCard extends StatelessWidget {
     required this.icon, required this.iconColor,
     required this.title, required this.subtitle,
     this.badge, this.badgeColor,
+    this.connecting = false,
     this.onTap, this.onDelete,
   });
 
@@ -521,7 +521,7 @@ class _DeviceCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: AppTheme.bg1,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppTheme.bg3),
+        border: Border.all(color: connecting ? AppTheme.primary.withOpacity(0.4) : AppTheme.bg3),
       ),
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
@@ -532,10 +532,18 @@ class _DeviceCard extends StatelessWidget {
             Container(
               width: 38, height: 38,
               decoration: BoxDecoration(
-                color: iconColor.withOpacity(0.1),
+                color: (connecting ? AppTheme.primary : iconColor).withOpacity(0.1),
                 borderRadius: BorderRadius.circular(9),
               ),
-              child: Icon(icon, size: 18, color: iconColor),
+              child: connecting
+                  ? const Center(child: SizedBox(
+                      width: 16, height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor: AlwaysStoppedAnimation(AppTheme.primary),
+                      ),
+                    ))
+                  : Icon(icon, size: 18, color: iconColor),
             ),
             const SizedBox(width: 12),
             Expanded(child: Column(
@@ -546,9 +554,9 @@ class _DeviceCard extends StatelessWidget {
                   fontWeight: FontWeight.w600, color: AppTheme.textPrimary,
                 )),
                 const SizedBox(height: 2),
-                Text(subtitle, style: const TextStyle(
+                Text(subtitle, style: TextStyle(
                   fontFamily: 'JetBrainsMono', fontSize: 11,
-                  color: AppTheme.textMuted,
+                  color: connecting ? AppTheme.primary : AppTheme.textMuted,
                 )),
               ],
             )),
@@ -566,14 +574,14 @@ class _DeviceCard extends StatelessWidget {
                 )),
               ),
             ],
-            if (onDelete != null)
+            if (onDelete != null && !connecting)
               IconButton(
                 icon: const Icon(Icons.close_rounded, size: 16, color: AppTheme.textMuted),
                 onPressed: onDelete,
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
               ),
-            if (badge == null && onDelete == null)
+            if (badge == null && onDelete == null && !connecting)
               const Icon(Icons.chevron_right_rounded, size: 18, color: AppTheme.textMuted),
           ]),
         ),
