@@ -41,7 +41,7 @@ class BinaryManager extends ChangeNotifier {
       final nativeDir = await _ch.invokeMethod<String>('getNativeLibraryDir');
       if (nativeDir == null) throw Exception('getNativeLibraryDir returned null');
 
-      val adb      = File('$nativeDir/libcablebee_adb.so');
+      final adb      = File('$nativeDir/libcablebee_adb.so');
       final fastboot = File('$nativeDir/libcablebee_fastboot.so');
 
       if (!await adb.exists())      throw Exception('libcablebee_adb.so not found in $nativeDir');
