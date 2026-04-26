@@ -124,7 +124,7 @@ class AppsScreenState extends State<AppsScreen>
       );
     }).toList();
 
-    // 加载应用名称（批量）
+    // 加载应用名称
     final pkgs = exApps.map((a) => a.packageName).toList();
     final labelMap = await adb.getAppLabels(pkgs);
     for (final app in exApps) {
@@ -137,12 +137,12 @@ class AppsScreenState extends State<AppsScreen>
     });
     _applyFilter();
 
-    // 异步懒加载图标（每次加载 10 个，避免阻塞 UI）
-    _loadIconsLazily(adb, exApps);
+    // 后台懒加载图标，每批 8 个
+    _loadIconsLazily(adb, List.from(exApps));
   }
 
   Future<void> _loadIconsLazily(AdbService adb, List<AppInfoEx> apps) async {
-    const batchSize = 10;
+    const batchSize = 8;
     for (var i = 0; i < apps.length; i += batchSize) {
       if (!mounted) return;
       final batch = apps.skip(i).take(batchSize).toList();
@@ -155,8 +155,7 @@ class AppsScreenState extends State<AppsScreen>
           }
         } catch (_) {}
       }));
-      // 每批之间稍微休息，避免设备过载
-      await Future.delayed(const Duration(milliseconds: 100));
+      await Future.delayed(const Duration(milliseconds: 80));
     }
   }
 
@@ -178,7 +177,7 @@ class AppsScreenState extends State<AppsScreen>
         .toSet();
   }
 
-  // _loadAppLabels 已移至 AdbService.getAppLabels()
+  // _loadAppLabels → 已移至 AdbService.getAppLabels()
 
   // ── 过滤与排序 ──────────────────────────────────────────────────────────────
 
