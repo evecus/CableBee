@@ -9,6 +9,7 @@ import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.*
 import android.util.Log
 import java.io.File
+import java.util.concurrent.TimeUnit
 
 private const val TAG = "CableBee"
 
@@ -18,100 +19,66 @@ class MainActivity : FlutterActivity() {
         private const val USB_CHANNEL = "com.cablebee/usb"
         private const val USB_EVENTS  = "com.cablebee/usb_events"
         private const val ADB_CHANNEL = "com.cablebee/adb"
-        private const val ADB_PORT    = 5037
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var usbEventSink: EventChannel.EventSink? = null
 
-    // adb/fastboot 二进制路径（来自 nativeLibraryDir，Android 保证可执行）
     private lateinit var adbBin: File
     private lateinit var fastbootBin: File
-    private lateinit var adbHome: File   // HOME 目录，key 存在此目录下的 .android/
 
-    // 已"连接"的 serial 集合（逻辑层管理）
     private val connectedSerials = mutableSetOf<String>()
 
-    // ── 初始化：指向 nativeLibraryDir 里的二进制 ────────────────────────────
-    // nativeLibraryDir = /data/app/包名/lib/arm64/，Android 保证可执行，无需 chmod
+    // ── 初始化二进制路径 ──────────────────────────────────────────────────────
 
     private fun initBinaries() {
         val nativeDir = applicationInfo.nativeLibraryDir
         adbBin      = File(nativeDir, "libcablebee_adb.so")
         fastbootBin = File(nativeDir, "libcablebee_fastboot.so")
-        // HOME 指向 filesDir，adb key 存在 filesDir/.android/adbkey
-        adbHome = filesDir
         Log.i(TAG, "adb: ${adbBin.absolutePath} exists=${adbBin.exists()} size=${adbBin.length()}")
         Log.i(TAG, "fastboot: ${fastbootBin.absolutePath} exists=${fastbootBin.exists()}")
     }
 
-    // ── 启动 adb server ──────────────────────────────────────────────────────
-
-    private fun startAdbServer() {
-        // 先用短超时快速检查 server 是否已在运行
-        val check = adb("devices", timeoutMs = 3_000)
-        if (check.exit == 0 && !check.stderr.contains("cannot connect")) {
-            Log.i(TAG, "adb server already running")
-            return
-        }
-
-        Log.i(TAG, "Starting adb server...")
-        val r = adb("start-server", timeoutMs = 8_000)
-        Log.i(TAG, "start-server: exit=${r.exit} out=${r.output}")
-
-        // 等待 server 就绪，最多 3 秒，每 300ms 检查一次
-        val deadline = System.currentTimeMillis() + 3_000
-        while (System.currentTimeMillis() < deadline) {
-            Thread.sleep(300)
-            if (adb("devices", timeoutMs = 2_000).exit == 0) {
-                Log.i(TAG, "adb server ready")
-                return
-            }
-        }
-        Log.w(TAG, "adb server may not have started")
-    }
-
-    // ── 执行 adb 命令（通过 -L 连接本地 server）─────────────────────────────
+    // ── 核心执行函数 ──────────────────────────────────────────────────────────
+    //
+    // 去掉 "-L tcp:5037"，不再依赖本地 adb server。
+    // adb 二进制直接以客户端模式运行，对每个命令建立独立连接。
+    // 彻底绕过 start-server/fork，解决 OPPO/一加 SELinux 限制。
 
     private data class AdbResult(val exit: Int, val stdout: String, val stderr: String) {
         val isSuccess get() = exit == 0 || stdout.isNotEmpty()
-        val output get() = (stdout + stderr).trim()
+        val output    get() = (stdout + stderr).trim()
     }
 
     private fun adb(vararg args: String, timeoutMs: Long = 15_000): AdbResult {
-        val cmd = mutableListOf(
-            adbBin.absolutePath,
-            "-L", "tcp:$ADB_PORT"
-        ) + args.toList()
+        val cmd = mutableListOf(adbBin.absolutePath) + args.toList()
         Log.d(TAG, "exec: ${cmd.joinToString(" ")}")
 
         val proc = ProcessBuilder(cmd).apply {
-            environment()["HOME"]   = filesDir.absolutePath
-            environment()["TMPDIR"] = cacheDir.absolutePath
+            environment()["HOME"]                    = filesDir.absolutePath
+            environment()["TMPDIR"]                  = cacheDir.absolutePath
+            environment()["ANDROID_ADB_SERVER_PORT"] = "15037"
         }.redirectErrorStream(false).start()
 
-        // 在独立线程读取流，避免缓冲区死锁
-        // 注意：必须在 destroyForcibly() 之前就开始读，且读取完毕才能结束
         val stdoutBuf = StringBuilder()
         val stderrBuf = StringBuilder()
 
         val stdoutThread = Thread {
             try { stdoutBuf.append(proc.inputStream.bufferedReader().readText()) }
-            catch (_: Exception) { /* 进程被杀时流关闭，正常忽略 */ }
+            catch (_: Exception) {}
         }.also { it.isDaemon = true; it.start() }
 
         val stderrThread = Thread {
             try { stderrBuf.append(proc.errorStream.bufferedReader().readText()) }
-            catch (_: Exception) { /* 进程被杀时流关闭，正常忽略 */ }
+            catch (_: Exception) {}
         }.also { it.isDaemon = true; it.start() }
 
-        val exited = proc.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+        val exited = proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
         if (!exited) {
-            Log.w(TAG, "adb timeout after ${timeoutMs}ms, killing: ${cmd.joinToString(" ")}")
+            Log.w(TAG, "adb timeout after ${timeoutMs}ms, killing")
             proc.destroyForcibly()
         }
 
-        // 等待读取线程结束，最多额外等 2 秒
         stdoutThread.join(2_000)
         stderrThread.join(2_000)
 
@@ -119,8 +86,44 @@ class MainActivity : FlutterActivity() {
         val stderr = stderrBuf.toString()
         val exit   = if (exited) runCatching { proc.exitValue() }.getOrDefault(1) else 1
 
-        Log.d(TAG, "exit=$exit stdout=${stdout.take(300)} stderr=${stderr.take(300)}")
+        Log.d(TAG, "exit=$exit stdout=${stdout.take(200)} stderr=${stderr.take(200)}")
         return AdbResult(exit, stdout, stderr)
+    }
+
+    // pair 需要往 stdin 写配对码，单独处理
+    private fun adbPair(host: String, port: Int, code: String, timeoutMs: Long = 30_000): AdbResult {
+        val cmd = listOf(adbBin.absolutePath, "pair", "$host:$port")
+        Log.d(TAG, "exec pair: ${cmd.joinToString(" ")}")
+
+        val proc = ProcessBuilder(cmd).apply {
+            environment()["HOME"]                    = filesDir.absolutePath
+            environment()["TMPDIR"]                  = cacheDir.absolutePath
+            environment()["ANDROID_ADB_SERVER_PORT"] = "15037"
+            redirectErrorStream(true)
+        }.start()
+
+        try {
+            proc.outputStream.bufferedWriter().use {
+                it.write("$code\n"); it.flush()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "pair stdin write failed: ${e.message}")
+        }
+
+        val outBuf = StringBuilder()
+        val readThread = Thread {
+            try { outBuf.append(proc.inputStream.bufferedReader().readText()) }
+            catch (_: Exception) {}
+        }.also { it.isDaemon = true; it.start() }
+
+        val exited = proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+        if (!exited) proc.destroyForcibly()
+        readThread.join(2_000)
+
+        val out  = outBuf.toString()
+        val exit = if (exited) runCatching { proc.exitValue() }.getOrDefault(1) else 1
+        Log.d(TAG, "pair exit=$exit out=${out.take(200)}")
+        return AdbResult(exit, out, "")
     }
 
     private fun ui(block: () -> Unit) = mainExecutor.execute(block)
@@ -130,13 +133,8 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        // 同步初始化（不涉及 IO，只是设置路径）
         initBinaries()
-        // 异步启动 adb server
-        scope.launch {
-            try { startAdbServer() }
-            catch (e: Exception) { Log.e(TAG, "startAdbServer error: ${e.message}") }
-        }
+        // 不再启动 adb server，直接用客户端模式
 
         // ── USB ───────────────────────────────────────────────────────────
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, USB_CHANNEL)
@@ -167,63 +165,56 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
 
-                    // getNativeLibraryDir → String（BinaryManager 兼容）
-                    "getNativeLibraryDir" -> {
+                    "getNativeLibraryDir" ->
                         result.success(applicationInfo.nativeLibraryDir)
-                    }
 
                     // connect(host, port) → serial
                     "connect" -> {
-                        val host = call.argument<String>("host") ?: return@setMethodCallHandler result.error("BAD_ARG","host required",null)
-                        val port = call.argument<Int>("port") ?: 5555
+                        val host   = call.argument<String>("host") ?: return@setMethodCallHandler result.error("BAD_ARG","host required",null)
+                        val port   = call.argument<Int>("port") ?: 5555
                         val serial = "$host:$port"
                         scope.launch {
-                            // 确保 server 在跑
-                            startAdbServer()
-                            val r = adb("connect", serial, timeoutMs = 20_000)
+                            Log.i(TAG, "connect: $serial")
+                            val r   = adb("connect", serial, timeoutMs = 20_000)
                             val out = r.output.lowercase()
-                            if (out.contains("connected") || out.contains("already connected")) {
-                                connectedSerials.add(serial)
-                                ui { result.success(serial) }
-                            } else if (out.contains("offline") || out.contains("unauthorized") ||
-                                       out.contains("failed to authenticate") || out.contains("failed to connect")) {
-                                // 设备可能正在等待用户授权 USB 调试
-                                // 轮询 adb devices，最多等待 30 秒
-                                Log.i(TAG, "connect: device offline/unauthorized, waiting for authorization... serial=$serial")
-                                var authorized = false
-                                repeat(30) { attempt ->
-                                    if (authorized) return@repeat
-                                    Thread.sleep(1_000)
-                                    // 重试 connect，触发授权弹窗（如果设备还未弹出）
-                                    if (attempt % 5 == 0) {
-                                        adb("connect", serial, timeoutMs = 5_000)
+                            when {
+                                out.contains("connected") || out.contains("already connected") -> {
+                                    connectedSerials.add(serial)
+                                    Log.i(TAG, "connect OK: $serial")
+                                    ui { result.success(serial) }
+                                }
+                                out.contains("offline") || out.contains("unauthorized") ||
+                                out.contains("failed to authenticate") -> {
+                                    Log.i(TAG, "connect: waiting for authorization on $serial")
+                                    var authorized = false
+                                    repeat(30) { attempt ->
+                                        if (authorized) return@repeat
+                                        Thread.sleep(1_000)
+                                        if (attempt % 5 == 0) adb("connect", serial, timeoutMs = 5_000)
+                                        val devOut = adb("devices", timeoutMs = 5_000).stdout
+                                        if (devOut.lines().any { it.startsWith(serial) && it.contains("\tdevice") }) {
+                                            authorized = true
+                                            connectedSerials.add(serial)
+                                            Log.i(TAG, "connect: authorized after ${attempt + 1}s")
+                                            ui { result.success(serial) }
+                                        }
                                     }
-                                    val devR = adb("devices")
-                                    val isOnline = devR.stdout.lines()
-                                        .any { it.startsWith(serial) && it.contains("\tdevice") }
-                                    if (isOnline) {
-                                        authorized = true
-                                        connectedSerials.add(serial)
-                                        Log.i(TAG, "connect: authorized after ${attempt + 1}s")
-                                        ui { result.success(serial) }
+                                    if (!authorized) {
+                                        ui { result.error("CONNECT_FAILED", "授权超时，请在设备上点击「允许 USB 调试」后重试", null) }
                                     }
                                 }
-                                if (!authorized) {
-                                    ui { result.error("CONNECT_FAILED", "授权超时，请在设备上点击「允许 USB 调试」后重试", null) }
-                                }
-                            } else {
-                                ui { result.error("CONNECT_FAILED", r.output, null) }
+                                else ->
+                                    ui { result.error("CONNECT_FAILED", r.output, null) }
                             }
                         }
                     }
 
-                    // disconnect(serial) → 软断开，保留 adb server 连接避免重新授权
+                    // disconnect(serial)
                     "disconnect" -> {
                         val serial = call.argument<String>("serial") ?: return@setMethodCallHandler result.error("BAD_ARG","serial required",null)
                         scope.launch {
                             connectedSerials.remove(serial)
-                            // 不调用 adb disconnect，保持 server 侧连接
-                            // 下次 connect 同一 serial 时 server 直接复用，不触发授权弹窗
+                            adb("disconnect", serial, timeoutMs = 5_000)
                             ui { result.success(null) }
                         }
                     }
@@ -232,12 +223,11 @@ class MainActivity : FlutterActivity() {
                     "devices" -> {
                         scope.launch {
                             try {
-                                val r = adb("devices")
+                                val r      = adb("devices", timeoutMs = 8_000)
                                 val online = r.stdout.lines()
                                     .drop(1)
                                     .filter { it.contains("\tdevice") }
                                     .map { it.substringBefore("\t").trim() }
-                                // 只返回我们主动连接过且 server 仍在线的设备
                                 val connected = online.filter { connectedSerials.contains(it) }
                                 ui { result.success(connected) }
                             } catch (e: Exception) {
@@ -295,22 +285,8 @@ class MainActivity : FlutterActivity() {
                         val code = call.argument<String>("code") ?: return@setMethodCallHandler result.error("BAD_ARG","code required",null)
                         scope.launch {
                             try {
-                                startAdbServer()
-                                val proc = ProcessBuilder(
-                                    adbBin.absolutePath, "-L", "tcp:$ADB_PORT",
-                                    "pair", "$host:$port"
-                                ).apply {
-                                    environment()["HOME"]   = filesDir.absolutePath
-                                    environment()["TMPDIR"] = cacheDir.absolutePath
-                                    redirectErrorStream(true)
-                                }.start()
-                                // 发送配对码
-                                proc.outputStream.bufferedWriter().use {
-                                    it.write("$code\n"); it.flush()
-                                }
-                                val out = proc.inputStream.bufferedReader().readText()
-                                proc.waitFor()
-                                ui { result.success(out) }
+                                val r = adbPair(host, port, code)
+                                ui { result.success(r.output) }
                             } catch (e: Exception) {
                                 ui { result.error("PAIR_FAILED", e.message, null) }
                             }
