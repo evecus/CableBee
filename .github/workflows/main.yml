@@ -82,10 +82,10 @@ jobs:
           EOF
 
       # ── Build APKs ────────────────────────────────────────────────
-      - name: Build arm64 APK
+      - name: Build APKs (arm64-v8a / armeabi-v7a / x86_64)
         run: |
           flutter build apk --release \
-            --target-platform android-arm64 \
+            --target-platform android-arm64,android-arm,android-x64 \
             --build-name="${{ steps.version.outputs.version }}" \
             --build-number="${{ github.run_number }}" \
             --dart-define=APP_VERSION="${{ steps.version.outputs.version }}" || true
@@ -140,7 +140,9 @@ jobs:
             ### Downloads
             | File | Architecture | Notes |
             |------|-------------|-------|
-            | `CableBee-*-arm64.apk` | arm64-v8a | 适用于所有现代 Android 设备 |
+            | `CableBee-*-arm64-v8a.apk` | arm64-v8a | 适用于所有现代 Android 设备（2018年后） |
+            | `CableBee-*-armeabi-v7a.apk` | armeabi-v7a | 适用于 32 位 ARM 老设备 |
+            | `CableBee-*-x86_64.apk` | x86_64 | 适用于 x86 模拟器 / Intel 设备 |
 
             ### What's New
             <!-- Add release notes here -->
