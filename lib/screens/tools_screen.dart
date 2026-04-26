@@ -466,7 +466,7 @@ class _ToolsScreenState extends State<ToolsScreen>
 
           const SizedBox(height: 24),
         ],
-      ),
+      );
     );
   }
 }
