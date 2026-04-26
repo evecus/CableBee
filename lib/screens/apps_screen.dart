@@ -124,14 +124,40 @@ class AppsScreenState extends State<AppsScreen>
       );
     }).toList();
 
-    // 加载应用名称（批量 dumpsys）
-    await _loadAppLabels(adb, exApps);
+    // 加载应用名称（批量）
+    final pkgs = exApps.map((a) => a.packageName).toList();
+    final labelMap = await adb.getAppLabels(pkgs);
+    for (final app in exApps) {
+      app.appLabel = labelMap[app.packageName];
+    }
 
     setState(() {
       _apps = exApps;
       _loading = false;
     });
     _applyFilter();
+
+    // 异步懒加载图标（每次加载 10 个，避免阻塞 UI）
+    _loadIconsLazily(adb, exApps);
+  }
+
+  Future<void> _loadIconsLazily(AdbService adb, List<AppInfoEx> apps) async {
+    const batchSize = 10;
+    for (var i = 0; i < apps.length; i += batchSize) {
+      if (!mounted) return;
+      final batch = apps.skip(i).take(batchSize).toList();
+      await Future.wait(batch.map((app) async {
+        if (app.iconBytes != null) return;
+        try {
+          final bytes = await adb.getAppIcon(app.apkPath);
+          if (bytes != null && bytes.isNotEmpty && mounted) {
+            setState(() => app.iconBytes = Uint8List.fromList(bytes));
+          }
+        } catch (_) {}
+      }));
+      // 每批之间稍微休息，避免设备过载
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
   }
 
   Future<Set<String>> _getSystemPackages(AdbService adb) async {
@@ -152,54 +178,7 @@ class AppsScreenState extends State<AppsScreen>
         .toSet();
   }
 
-  Future<void> _loadAppLabels(AdbService adb, List<AppInfoEx> apps) async {
-    // 方案一：cmd package list packages --show-labels（部分系统支持）
-    try {
-      final res = await adb.shell('cmd package list packages --show-labels 2>&1');
-      if (res.isSuccess && res.stdout.contains('package:')) {
-        // 格式: package:com.example.app  label:App Name
-        final labelMap = <String, String>{};
-        for (final line in res.stdout.split('\n')) {
-          final pkgMatch = RegExp(r'package:(\S+)').firstMatch(line);
-          final labelMatch = RegExp(r'label:(.+)$').firstMatch(line);
-          if (pkgMatch != null && labelMatch != null) {
-            labelMap[pkgMatch.group(1)!.trim()] = labelMatch.group(1)!.trim();
-          }
-        }
-        if (labelMap.isNotEmpty) {
-          for (final app in apps) {
-            app.appLabel = labelMap[app.packageName];
-          }
-          // 如果大部分有标签就认为成功
-          final labeled = apps.where((a) => a.appLabel != null).length;
-          if (labeled > apps.length ~/ 2) return;
-        }
-      }
-    } catch (_) {}
-
-    // 方案二：通过 dumpsys package 逐个解析 applicationInfo 的 nonLocalizedLabel
-    // 批量执行以减少往返次数（每批 10 个）
-    const batchSize = 10;
-    for (var i = 0; i < apps.length; i += batchSize) {
-      final batch = apps.skip(i).take(batchSize).toList();
-      final cmds = batch
-          .map((a) => 'dumpsys package ${a.packageName} 2>/dev/null | grep -m1 "nonLocalizedLabel\\|labelRes\\|label="')
-          .join('; echo "---"; ');
-      try {
-        final res = await adb.shell(cmds);
-        final segments = res.stdout.split('---');
-        for (var j = 0; j < batch.length && j < segments.length; j++) {
-          final seg = segments[j];
-          // Try nonLocalizedLabel first
-          final nlMatch = RegExp(r'nonLocalizedLabel=(.+?)(?:\s|$)').firstMatch(seg);
-          if (nlMatch != null && nlMatch.group(1) != 'null') {
-            batch[j].appLabel = nlMatch.group(1)!.trim();
-          }
-        }
-      } catch (_) {}
-    }
-    // 没有标签的 app 保持 null，displayName 会使用 _shortName（包名最后一段）
-  }
+  // _loadAppLabels 已移至 AdbService.getAppLabels()
 
   // ── 过滤与排序 ──────────────────────────────────────────────────────────────
 
