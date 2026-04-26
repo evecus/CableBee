@@ -1,3 +1,6 @@
+// lib/screens/device_screen.dart
+// 底部导航栏支持左右滑动（SingleChildScrollView），容纳 7 个 Tab
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/device.dart';
@@ -8,6 +11,8 @@ import 'shell_screen.dart';
 import 'apps_screen.dart';
 import 'files_screen.dart';
 import 'tools_screen.dart';
+import 'process_screen.dart';
+import 'remote_screen.dart';
 
 class DeviceScreen extends StatefulWidget {
   final AdbDevice device;
@@ -20,22 +25,25 @@ class _DeviceScreenState extends State<DeviceScreen> {
   int _tab = 0;
   List<Widget> _tabActions = [];
 
-  // GlobalKeys to call refreshActions() on each sub-screen
-  final _infoKey   = GlobalKey<DeviceInfoScreenState>();
-  final _shellKey  = GlobalKey<ShellScreenState>();
-  final _appsKey   = GlobalKey<AppsScreenState>();
-  final _filesKey  = GlobalKey<FilesScreenState>();
-  final _toolsKey  = GlobalKey<ToolsScreenState>();
+  final _infoKey    = GlobalKey<DeviceInfoScreenState>();
+  final _shellKey   = GlobalKey<ShellScreenState>();
+  final _appsKey    = GlobalKey<AppsScreenState>();
+  final _filesKey   = GlobalKey<FilesScreenState>();
+  final _toolsKey   = GlobalKey<ToolsScreenState>();
+  final _procKey    = GlobalKey<ProcessScreenState>();
+  final _remoteKey  = GlobalKey<RemoteScreenState>();
 
   static const _tabs = [
-    _TabItem(icon: Icons.info_outline_rounded,  label: '信息'),
-    _TabItem(icon: Icons.terminal_rounded,       label: 'Shell'),
-    _TabItem(icon: Icons.apps_rounded,           label: '应用'),
-    _TabItem(icon: Icons.folder_outlined,        label: '文件'),
-    _TabItem(icon: Icons.build_outlined,         label: '工具'),
+    _TabItem(icon: Icons.info_outline_rounded,    label: '信息'),
+    _TabItem(icon: Icons.terminal_rounded,         label: 'Shell'),
+    _TabItem(icon: Icons.apps_rounded,             label: '应用'),
+    _TabItem(icon: Icons.folder_outlined,          label: '文件'),
+    _TabItem(icon: Icons.build_outlined,           label: '工具'),
+    _TabItem(icon: Icons.memory_rounded,           label: '进程'),
+    _TabItem(icon: Icons.cast_rounded,             label: '投屏'),
   ];
 
-  static const _tabTitles = ['信息', 'Shell', '应用', '文件', '工具'];
+  static const _tabTitles = ['信息', 'Shell', '应用', '文件', '工具', '进程管理', '远程控制'];
 
   void _onActionsChanged(List<Widget> actions) {
     if (mounted) setState(() => _tabActions = actions);
@@ -46,14 +54,15 @@ class _DeviceScreenState extends State<DeviceScreen> {
       _tab = i;
       _tabActions = [];
     });
-    // Ask the now-visible screen to re-push its actions
     WidgetsBinding.instance.addPostFrameCallback((_) {
       switch (i) {
-        case 0: _infoKey.currentState?.refreshActions();  break;
-        case 1: _shellKey.currentState?.refreshActions(); break;
-        case 2: _appsKey.currentState?.refreshActions();  break;
-        case 3: _filesKey.currentState?.refreshActions(); break;
-        case 4: _toolsKey.currentState?.refreshActions(); break;
+        case 0: _infoKey.currentState?.refreshActions();   break;
+        case 1: _shellKey.currentState?.refreshActions();  break;
+        case 2: _appsKey.currentState?.refreshActions();   break;
+        case 3: _filesKey.currentState?.refreshActions();  break;
+        case 4: _toolsKey.currentState?.refreshActions();  break;
+        case 5: _procKey.currentState?.refreshActions();   break;
+        case 6: _remoteKey.currentState?.refreshActions(); break;
       }
     });
   }
@@ -74,7 +83,8 @@ class _DeviceScreenState extends State<DeviceScreen> {
         backgroundColor: AppTheme.bg0,
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 18, color: AppTheme.textSecondary),
+          icon: const Icon(Icons.arrow_back_ios_new_rounded,
+              size: 18, color: AppTheme.textSecondary),
           onPressed: () => Navigator.pop(context),
         ),
         title: Text(
@@ -92,63 +102,132 @@ class _DeviceScreenState extends State<DeviceScreen> {
       body: IndexedStack(
         index: _tab,
         children: [
-          DeviceInfoScreen(key: _infoKey,  onActionsChanged: _onActionsChanged),
-          ShellScreen     (key: _shellKey, onActionsChanged: _onActionsChanged),
-          AppsScreen      (key: _appsKey,  onActionsChanged: _onActionsChanged),
-          FilesScreen     (key: _filesKey, onActionsChanged: _onActionsChanged),
-          ToolsScreen     (key: _toolsKey, onActionsChanged: _onActionsChanged),
+          DeviceInfoScreen(key: _infoKey,   onActionsChanged: _onActionsChanged),
+          ShellScreen     (key: _shellKey,  onActionsChanged: _onActionsChanged),
+          AppsScreen      (key: _appsKey,   onActionsChanged: _onActionsChanged),
+          FilesScreen     (key: _filesKey,  onActionsChanged: _onActionsChanged),
+          ToolsScreen     (key: _toolsKey,  onActionsChanged: _onActionsChanged),
+          ProcessScreen   (key: _procKey,   onActionsChanged: _onActionsChanged),
+          RemoteScreen    (key: _remoteKey, onActionsChanged: _onActionsChanged),
         ],
       ),
-      bottomNavigationBar: Container(
-        decoration: const BoxDecoration(
-          color: AppTheme.bg1,
-          border: Border(top: BorderSide(color: AppTheme.bg3, width: 1)),
-        ),
-        child: SafeArea(
-          top: false,
-          child: SizedBox(
-            height: 60,
+      bottomNavigationBar: _ScrollableBottomNav(
+        tabs: _tabs,
+        selectedIndex: _tab,
+        onTap: _switchTab,
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  可横向滑动的底部导航栏
+// ─────────────────────────────────────────────────────────────
+class _ScrollableBottomNav extends StatefulWidget {
+  final List<_TabItem> tabs;
+  final int selectedIndex;
+  final void Function(int) onTap;
+
+  const _ScrollableBottomNav({
+    required this.tabs,
+    required this.selectedIndex,
+    required this.onTap,
+  });
+
+  @override
+  State<_ScrollableBottomNav> createState() => _ScrollableBottomNavState();
+}
+
+class _ScrollableBottomNavState extends State<_ScrollableBottomNav> {
+  final _scrollCtrl = ScrollController();
+
+  @override
+  void didUpdateWidget(_ScrollableBottomNav old) {
+    super.didUpdateWidget(old);
+    // 切 tab 后自动将选中项滚到视野内
+    if (old.selectedIndex != widget.selectedIndex) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToSelected());
+    }
+  }
+
+  void _scrollToSelected() {
+    if (!_scrollCtrl.hasClients) return;
+    // 每个 tab 宽度约 72px
+    const itemW = 72.0;
+    final target = widget.selectedIndex * itemW;
+    final viewport = _scrollCtrl.position.viewportDimension;
+    final offset = (target - viewport / 2 + itemW / 2).clamp(
+      _scrollCtrl.position.minScrollExtent,
+      _scrollCtrl.position.maxScrollExtent,
+    );
+    _scrollCtrl.animateTo(offset,
+        duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+  }
+
+  @override
+  void dispose() {
+    _scrollCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: AppTheme.bg1,
+        border: Border(top: BorderSide(color: AppTheme.bg3, width: 1)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: SizedBox(
+          height: 60,
+          child: SingleChildScrollView(
+            controller: _scrollCtrl,
+            scrollDirection: Axis.horizontal,
+            physics: const BouncingScrollPhysics(),
             child: Row(
-              children: List.generate(_tabs.length, (i) {
-                final item = _tabs[i];
-                final selected = _tab == i;
-                return Expanded(
-                  child: InkWell(
-                    onTap: () => _switchTab(i),
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 180),
-                      curve: Curves.easeInOut,
-                      padding: const EdgeInsets.symmetric(vertical: 6),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          AnimatedContainer(
-                            duration: const Duration(milliseconds: 180),
-                            width: selected ? 36 : 0,
-                            height: 3,
-                            margin: const EdgeInsets.only(bottom: 4),
-                            decoration: BoxDecoration(
-                              color: AppTheme.primary,
-                              borderRadius: BorderRadius.circular(2),
-                            ),
+              children: List.generate(widget.tabs.length, (i) {
+                final item     = widget.tabs[i];
+                final selected = widget.selectedIndex == i;
+                return InkWell(
+                  onTap: () => widget.onTap(i),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    curve: Curves.easeInOut,
+                    width: 72,
+                    padding: const EdgeInsets.symmetric(vertical: 6),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        // 顶部指示条
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: 180),
+                          width: selected ? 32 : 0,
+                          height: 3,
+                          margin: const EdgeInsets.only(bottom: 4),
+                          decoration: BoxDecoration(
+                            color: AppTheme.primary,
+                            borderRadius: BorderRadius.circular(2),
                           ),
-                          Icon(
-                            item.icon,
-                            size: 20,
+                        ),
+                        Icon(
+                          item.icon,
+                          size: 20,
+                          color: selected ? AppTheme.primary : AppTheme.textMuted,
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          item.label,
+                          style: TextStyle(
+                            fontFamily: 'SpaceMono',
+                            fontSize: 9,
+                            fontWeight: selected
+                                ? FontWeight.w700
+                                : FontWeight.w400,
                             color: selected ? AppTheme.primary : AppTheme.textMuted,
                           ),
-                          const SizedBox(height: 3),
-                          Text(
-                            item.label,
-                            style: TextStyle(
-                              fontFamily: 'SpaceMono',
-                              fontSize: 10,
-                              fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
-                              color: selected ? AppTheme.primary : AppTheme.textMuted,
-                            ),
-                          ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
                   ),
                 );
@@ -161,6 +240,7 @@ class _DeviceScreenState extends State<DeviceScreen> {
   }
 }
 
+// ─────────────────────────────────────────────────────────────
 class _TabItem {
   final IconData icon;
   final String label;
