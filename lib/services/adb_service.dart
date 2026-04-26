@@ -203,9 +203,13 @@ class AdbService extends ChangeNotifier {
     return result.stdout.split('\n')
         .where((l) => l.startsWith('package:'))
         .map((l) {
-          final parts = l.substring(8).split('=');
-          if (parts.length < 2) return null;
-          return AppInfo(apkPath: parts[0], packageName: parts.sublist(1).join('=').trim());
+          final raw = l.substring(8); // strip 'package:'
+          final eqIdx = raw.lastIndexOf('=');
+          if (eqIdx <= 0) return null;
+          final apkPath = raw.substring(0, eqIdx).trim();
+          final packageName = raw.substring(eqIdx + 1).trim();
+          if (packageName.isEmpty) return null;
+          return AppInfo(apkPath: apkPath, packageName: packageName);
         })
         .whereType<AppInfo>()
         .toList();
@@ -413,15 +417,36 @@ class FileEntry {
              required this.permissions, required this.size, required this.date});
 
   static FileEntry? parseLsLine(String line) {
-    final parts = line.trim().split(RegExp(r'\s+'));
-    if (parts.length < 8) return null;
+    final trimmed = line.trim();
+    if (trimmed.isEmpty) return null;
+    final parts = trimmed.split(RegExp(r'\s+'));
+    if (parts.length < 5) return null;
     final perms = parts[0];
     if (!perms.startsWith('-') && !perms.startsWith('d') && !perms.startsWith('l')) return null;
-    final name = parts.sublist(7).join(' ');
+
+    // ls -la has columns: perms [links] owner group size date time name
+    // Some Android ls omits the links column; detect by checking if parts[1] is numeric
+    final hasLinkCount = int.tryParse(parts[1]) != null;
+    final offset = hasLinkCount ? 1 : 0;
+
+    if (parts.length < 7 + offset) return null;
+
+    final size = parts[3 + offset];
+    final date = '${parts[4 + offset]} ${parts[5 + offset]}';
+
+    // Name may contain spaces; for symlinks strip " -> target" suffix
+    final rawName = parts.sublist(6 + offset).join(' ');
+    final name = perms.startsWith('l')
+        ? rawName.split(' -> ').first.trim()
+        : rawName;
+
     if (name == '.' || name == '..') return null;
     return FileEntry(
-      permissions: perms, isDirectory: perms.startsWith('d'),
-      size: parts[4], date: '${parts[5]} ${parts[6]}', name: name,
+      permissions: perms,
+      isDirectory: perms.startsWith('d'),
+      size: size,
+      date: date,
+      name: name,
     );
   }
 }
