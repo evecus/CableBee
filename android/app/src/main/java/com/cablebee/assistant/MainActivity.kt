@@ -48,38 +48,27 @@ class MainActivity : FlutterActivity() {
     // ── 启动 adb server ──────────────────────────────────────────────────────
 
     private fun startAdbServer() {
-        try {
-            // 检查 server 是否已经在跑
-            val check = adb("devices")
-            if (check.exit == 0) {
-                Log.i(TAG, "adb server already running")
-                return
-            }
-        } catch (_: Exception) {}
+        // 先检查 server 是否已在运行
+        val check = adb("devices")
+        if (check.exit == 0 && !check.stderr.contains("cannot connect")) {
+            Log.i(TAG, "adb server already running")
+            return
+        }
 
         Log.i(TAG, "Starting adb server...")
-        // 和甲壳虫完全一样的启动方式
-        ProcessBuilder(
-            adbBin.absolutePath,
-            "-L", "tcp:$ADB_PORT",
-            "fork-server", "server",
-            "--reply-fd", "4"
-        ).apply {
-            environment()["HOME"] = filesDir.absolutePath
-            environment()["TMPDIR"] = cacheDir.absolutePath
-        }.start()   // 不等待，后台持续运行
+        // start-server 会自行 fork 后台进程，不需要 reply-fd
+        val r = adb("start-server", timeoutMs = 10_000)
+        Log.i(TAG, "start-server: exit=${r.exit} out=${r.output}")
 
-        // 等 server 就绪
-        repeat(10) {
-            Thread.sleep(200)
-            try {
-                if (adb("devices").exit == 0) {
-                    Log.i(TAG, "adb server started")
-                    return
-                }
-            } catch (_: Exception) {}
+        // 等待 server 就绪，最多 4.5 秒
+        repeat(15) {
+            Thread.sleep(300)
+            if (adb("devices").exit == 0) {
+                Log.i(TAG, "adb server ready")
+                return
+            }
         }
-        Log.w(TAG, "adb server may not have started properly")
+        Log.w(TAG, "adb server may not have started")
     }
 
     // ── 执行 adb 命令（通过 -L 连接本地 server）─────────────────────────────
