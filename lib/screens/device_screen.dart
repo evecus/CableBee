@@ -18,6 +18,7 @@ class DeviceScreen extends StatefulWidget {
 
 class _DeviceScreenState extends State<DeviceScreen> {
   int _tab = 0;
+  List<Widget> _currentActions = [];
 
   static const _tabs = [
     _TabItem(icon: Icons.info_outline_rounded,   label: '信息'),
@@ -26,6 +27,14 @@ class _DeviceScreenState extends State<DeviceScreen> {
     _TabItem(icon: Icons.folder_outlined,         label: '文件'),
     _TabItem(icon: Icons.build_outlined,          label: '工具'),
   ];
+
+  static const _titles = ['信息', 'Shell', '应用', '文件', '工具'];
+
+  void _onActionsChanged(List<Widget> actions) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() => _currentActions = actions);
+    });
+  }
 
   @override
   void initState() {
@@ -37,67 +46,36 @@ class _DeviceScreenState extends State<DeviceScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final adb = context.watch<AdbService>();
-    final connected = adb.hasDevice;
-
     return Scaffold(
       backgroundColor: AppTheme.bg0,
       appBar: AppBar(
         backgroundColor: AppTheme.bg0,
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 18, color: AppTheme.textSecondary),
+          icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 18,
+              color: AppTheme.textSecondary),
           onPressed: () => Navigator.pop(context),
         ),
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              widget.device.displayName,
-              style: const TextStyle(
-                fontFamily: 'SpaceMono', fontSize: 14,
-                fontWeight: FontWeight.w700, color: AppTheme.textPrimary,
-              ),
-            ),
-            Row(children: [
-              Container(
-                width: 6, height: 6,
-                decoration: BoxDecoration(
-                  color: connected ? AppTheme.success : AppTheme.danger,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: 5),
-              Text(
-                connected ? widget.device.serial : '已断开',
-                style: TextStyle(
-                  fontFamily: 'JetBrainsMono', fontSize: 10,
-                  color: connected ? AppTheme.success : AppTheme.danger,
-                ),
-              ),
-            ]),
-          ],
+        title: Text(
+          _titles[_tab],
+          style: const TextStyle(
+            fontFamily: 'SpaceMono', fontSize: 16,
+            fontWeight: FontWeight.w700, color: AppTheme.textPrimary,
+          ),
         ),
         actions: [
-          IconButton(
-            tooltip: '断开连接',
-            icon: const Icon(Icons.link_off_rounded, size: 20, color: AppTheme.textMuted),
-            onPressed: () async {
-              await context.read<AdbService>().disconnect(serial: widget.device.serial);
-              if (context.mounted) Navigator.pop(context);
-            },
-          ),
+          ..._currentActions,
           const SizedBox(width: 4),
         ],
       ),
       body: IndexedStack(
         index: _tab,
         children: [
-          const DeviceInfoScreen(),
-          const ShellScreen(),
-          const AppsScreen(),
-          const FilesScreen(),
-          const ToolsScreen(),
+          DeviceInfoScreen(onActionsChanged: _onActionsChanged),
+          ShellScreen(onActionsChanged: _onActionsChanged),
+          AppsScreen(onActionsChanged: _onActionsChanged),
+          FilesScreen(onActionsChanged: _onActionsChanged),
+          ToolsScreen(onActionsChanged: _onActionsChanged),
         ],
       ),
       bottomNavigationBar: Container(
@@ -115,7 +93,12 @@ class _DeviceScreenState extends State<DeviceScreen> {
                 final selected = _tab == i;
                 return Expanded(
                   child: InkWell(
-                    onTap: () => setState(() => _tab = i),
+                    onTap: () {
+                      setState(() {
+                        _tab = i;
+                        _currentActions = [];
+                      });
+                    },
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 180),
                       curve: Curves.easeInOut,
