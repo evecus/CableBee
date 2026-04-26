@@ -48,22 +48,22 @@ class MainActivity : FlutterActivity() {
     // ── 启动 adb server ──────────────────────────────────────────────────────
 
     private fun startAdbServer() {
-        // 先检查 server 是否已在运行
-        val check = adb("devices")
+        // 先用短超时快速检查 server 是否已在运行
+        val check = adb("devices", timeoutMs = 3_000)
         if (check.exit == 0 && !check.stderr.contains("cannot connect")) {
             Log.i(TAG, "adb server already running")
             return
         }
 
         Log.i(TAG, "Starting adb server...")
-        // start-server 会自行 fork 后台进程，不需要 reply-fd
-        val r = adb("start-server", timeoutMs = 10_000)
+        val r = adb("start-server", timeoutMs = 8_000)
         Log.i(TAG, "start-server: exit=${r.exit} out=${r.output}")
 
-        // 等待 server 就绪，最多 4.5 秒
-        repeat(15) {
+        // 等待 server 就绪，最多 3 秒，每 300ms 检查一次
+        val deadline = System.currentTimeMillis() + 3_000
+        while (System.currentTimeMillis() < deadline) {
             Thread.sleep(300)
-            if (adb("devices").exit == 0) {
+            if (adb("devices", timeoutMs = 2_000).exit == 0) {
                 Log.i(TAG, "adb server ready")
                 return
             }
@@ -81,7 +81,7 @@ class MainActivity : FlutterActivity() {
     private fun adb(vararg args: String, timeoutMs: Long = 15_000): AdbResult {
         val cmd = mutableListOf(
             adbBin.absolutePath,
-            "-L", "tcp:$ADB_PORT"   // 连接本地 server，和甲壳虫一样
+            "-L", "tcp:$ADB_PORT"
         ) + args.toList()
         Log.d(TAG, "exec: ${cmd.joinToString(" ")}")
 
@@ -90,16 +90,34 @@ class MainActivity : FlutterActivity() {
             environment()["TMPDIR"] = cacheDir.absolutePath
         }.redirectErrorStream(false).start()
 
-        // 异步读避免缓冲区死锁
-        val stdoutJob = scope.async { proc.inputStream.bufferedReader().readText() }
-        val stderrJob = scope.async { proc.errorStream.bufferedReader().readText() }
+        // 在独立线程读取流，避免缓冲区死锁
+        // 注意：必须在 destroyForcibly() 之前就开始读，且读取完毕才能结束
+        val stdoutBuf = StringBuilder()
+        val stderrBuf = StringBuilder()
+
+        val stdoutThread = Thread {
+            try { stdoutBuf.append(proc.inputStream.bufferedReader().readText()) }
+            catch (_: Exception) { /* 进程被杀时流关闭，正常忽略 */ }
+        }.also { it.isDaemon = true; it.start() }
+
+        val stderrThread = Thread {
+            try { stderrBuf.append(proc.errorStream.bufferedReader().readText()) }
+            catch (_: Exception) { /* 进程被杀时流关闭，正常忽略 */ }
+        }.also { it.isDaemon = true; it.start() }
 
         val exited = proc.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
-        if (!exited) proc.destroyForcibly()
+        if (!exited) {
+            Log.w(TAG, "adb timeout after ${timeoutMs}ms, killing: ${cmd.joinToString(" ")}")
+            proc.destroyForcibly()
+        }
 
-        val stdout = runBlocking { stdoutJob.await() }
-        val stderr = runBlocking { stderrJob.await() }
-        val exit   = if (exited) proc.exitValue() else 1
+        // 等待读取线程结束，最多额外等 2 秒
+        stdoutThread.join(2_000)
+        stderrThread.join(2_000)
+
+        val stdout = stdoutBuf.toString()
+        val stderr = stderrBuf.toString()
+        val exit   = if (exited) runCatching { proc.exitValue() }.getOrDefault(1) else 1
 
         Log.d(TAG, "exit=$exit stdout=${stdout.take(300)} stderr=${stderr.take(300)}")
         return AdbResult(exit, stdout, stderr)
