@@ -187,7 +187,9 @@ class AdbService extends ChangeNotifier {
   // ── 文件列表 ──────────────────────────────────────────────────────────────
 
   Future<List<FileEntry>> listFiles(String path) async {
-    final result = await shell('ls -la "$path" 2>&1');
+    // 末尾加 / 强制把符号链接当目录处理，等同于进入链接目标
+    final safePath = path.endsWith('/') ? path : '$path/';
+    final result = await shell('ls -la "$safePath" 2>&1');
     return result.stdout
         .split('\n')
         .map(FileEntry.parseLsLine)
@@ -203,7 +205,7 @@ class AdbService extends ChangeNotifier {
     return result.stdout.split('\n')
         .where((l) => l.startsWith('package:'))
         .map((l) {
-          final raw = l.substring(8); // strip 'package:'
+          final raw = l.substring(8); // 去掉 'package:'
           final eqIdx = raw.lastIndexOf('=');
           if (eqIdx <= 0) return null;
           final apkPath = raw.substring(0, eqIdx).trim();
@@ -380,7 +382,121 @@ class AdbService extends ChangeNotifier {
 
   // ── 工具方法 ──────────────────────────────────────────────────────────────
 
-  Future<T?> _invoke<T>(String method, Map<String, dynamic> args) =>
+  // ── 应用标签与图标 ──────────────────────────────────────────────────────────
+
+  /// 批量获取应用标签。优先用 cmd package --show-labels，失败则用 dumpsys。
+  Future<Map<String, String>> getAppLabels(List<String> packages) async {
+    final labelMap = <String, String>{};
+
+    // 方案一：cmd package list packages --show-labels（Android 8+）
+    try {
+      final res = await shell('cmd package list packages --show-labels 2>&1');
+      if (res.isSuccess && res.stdout.contains('label:')) {
+        for (final line in res.stdout.split('\n')) {
+          final pkgMatch = RegExp(r'package:(\S+)').firstMatch(line);
+          final lblMatch = RegExp(r'label:(.+)$').firstMatch(line);
+          if (pkgMatch != null && lblMatch != null) {
+            final pkg = pkgMatch.group(1)!.trim();
+            final lbl = lblMatch.group(1)!.trim();
+            if (lbl.isNotEmpty && !lbl.startsWith('@')) labelMap[pkg] = lbl;
+          }
+        }
+        if (labelMap.length > packages.length ~/ 2) return labelMap;
+      }
+    } catch (_) {}
+
+    // 方案二：dumpsys package 逐个解析 nonLocalizedLabel（每批 8 个）
+    const batchSize = 8;
+    for (var i = 0; i < packages.length; i += batchSize) {
+      final batch = packages.skip(i).take(batchSize).toList();
+      final cmd = batch
+          .map((p) => 'echo "PKG:$p"; dumpsys package $p 2>/dev/null | grep -m1 nonLocalizedLabel')
+          .join('; ');
+      try {
+        final res = await shell(cmd, timeoutMs: 20000);
+        String? currentPkg;
+        for (final line in res.stdout.split('\n')) {
+          final pkgLine = RegExp(r'^PKG:(.+)$').firstMatch(line.trim());
+          if (pkgLine != null) { currentPkg = pkgLine.group(1)!.trim(); continue; }
+          if (currentPkg != null) {
+            final m = RegExp(r'nonLocalizedLabel=(.+?)(?:\s|$)').firstMatch(line);
+            if (m != null && m.group(1) != 'null' && !m.group(1)!.startsWith('@')) {
+              labelMap[currentPkg] = m.group(1)!.trim();
+            }
+          }
+        }
+      } catch (_) {}
+    }
+    return labelMap;
+  }
+
+  /// 提取单个应用图标（PNG 字节）。
+  /// 原理：通过 aapt/aapt2 读出图标资源路径，再 unzip 从 APK 中提取 PNG 并 base64 编码。
+  Future<List<int>?> getAppIcon(String apkPath) async {
+    try {
+      // 1. 用 aapt dump badging 获取图标路径（优先最高密度）
+      final aaptRes = await shell(
+          'aapt dump badging "$apkPath" 2>/dev/null | grep "^application-icon" | tail -1',
+          timeoutMs: 10000);
+      String? iconEntry;
+      if (aaptRes.isSuccess && aaptRes.stdout.isNotEmpty) {
+        final m = RegExp(r"'([^']+\.png)'").firstMatch(aaptRes.stdout.trim());
+        iconEntry = m?.group(1);
+      }
+      // fallback：尝试 aapt2
+      if (iconEntry == null) {
+        final a2 = await shell(
+            'aapt2 dump badging "$apkPath" 2>/dev/null | grep "^application-icon" | tail -1',
+            timeoutMs: 10000);
+        if (a2.isSuccess && a2.stdout.isNotEmpty) {
+          final m = RegExp(r"'([^']+\.png)'").firstMatch(a2.stdout.trim());
+          iconEntry = m?.group(1);
+        }
+      }
+      // 2. 用 unzip + base64 提取图标字节
+      if (iconEntry != null && iconEntry.isNotEmpty) {
+        final b64Res = await shell(
+            'unzip -p "$apkPath" "$iconEntry" 2>/dev/null | base64 -w0',
+            timeoutMs: 10000);
+        if (b64Res.isSuccess && b64Res.stdout.trim().isNotEmpty) {
+          try {
+            // base64 decode
+            final bytes = _decodeBase64(b64Res.stdout.trim());
+            if (bytes != null && bytes.isNotEmpty) return bytes;
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  List<int>? _decodeBase64(String s) {
+    try {
+      // ignore: no_leading_underscores_for_local_identifiers
+      final clean = s.replaceAll(RegExp(r'\s'), '');
+      // Use dart:convert base64Decode
+      return _base64Decode(clean);
+    } catch (_) { return null; }
+  }
+
+  List<int> _base64Decode(String s) {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    final lookup = <int, int>{};
+    for (var i = 0; i < chars.length; i++) lookup[chars.codeUnitAt(i)] = i;
+    final clean = s.replaceAll('=', '');
+    final out = <int>[];
+    var buf = 0, bits = 0;
+    for (final c in clean.codeUnits) {
+      final v = lookup[c];
+      if (v == null) continue;
+      buf = (buf << 6) | v;
+      bits += 6;
+      if (bits >= 8) { bits -= 8; out.add((buf >> bits) & 0xff); }
+    }
+    return out;
+  }
+
+    Future<T?> _invoke<T>(String method, Map<String, dynamic> args) =>
       _ch.invokeMethod<T>(method, args);
 
   AdbCommandResult _noDevice() =>
@@ -424,18 +540,18 @@ class FileEntry {
     final perms = parts[0];
     if (!perms.startsWith('-') && !perms.startsWith('d') && !perms.startsWith('l')) return null;
 
-    // ls -la has columns: perms [links] owner group size date time name
-    // Some Android ls omits the links column; detect by checking if parts[1] is numeric
+    // Android ls -la 列格式: perms [硬链接数] owner group size date time name
+    // 部分 Android ls 没有硬链接数列，通过判断 parts[1] 是否为数字来识别
     final hasLinkCount = int.tryParse(parts[1]) != null;
-    final offset = hasLinkCount ? 1 : 0;
+    final off = hasLinkCount ? 1 : 0; // 列偏移量
 
-    if (parts.length < 7 + offset) return null;
+    if (parts.length < 7 + off) return null;
 
-    final size = parts[3 + offset];
-    final date = '${parts[4 + offset]} ${parts[5 + offset]}';
+    final size = parts[3 + off];
+    final date = '${parts[4 + off]} ${parts[5 + off]}';
 
-    // Name may contain spaces; for symlinks strip " -> target" suffix
-    final rawName = parts.sublist(6 + offset).join(' ');
+    // 名称部分（可能含空格）；符号链接去掉 " -> target" 后缀
+    final rawName = parts.sublist(6 + off).join(' ');
     final name = perms.startsWith('l')
         ? rawName.split(' -> ').first.trim()
         : rawName;
