@@ -317,7 +317,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       )
                     : const Icon(Icons.cable_rounded, size: 16),
-                label: Text(_connecting ? '等待授权...' : '连接'),
+                label: Text(_connecting ? '连接中...' : '连接'),
                 style: FilledButton.styleFrom(
                   backgroundColor: AppTheme.primary,
                   foregroundColor: AppTheme.bg0,
