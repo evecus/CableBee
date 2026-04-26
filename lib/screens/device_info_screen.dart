@@ -9,13 +9,15 @@ class DeviceInfoScreen extends StatefulWidget {
   final void Function(List<Widget> actions)? onActionsChanged;
   const DeviceInfoScreen({super.key, this.onActionsChanged});
   @override
-  State<DeviceInfoScreen> createState() => _DeviceInfoScreenState();
+  State<DeviceInfoScreen> createState() => DeviceInfoScreenState();
 }
 
-class _DeviceInfoScreenState extends State<DeviceInfoScreen>
+class DeviceInfoScreenState extends State<DeviceInfoScreen>
     with AutomaticKeepAliveClientMixin {
   @override
   bool get wantKeepAlive => true;
+
+  void refreshActions() => widget.onActionsChanged?.call([]);
 
   Map<String, String>? _info;
   bool _loading = false;

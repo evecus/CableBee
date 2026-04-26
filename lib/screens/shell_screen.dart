@@ -9,12 +9,14 @@ class ShellScreen extends StatefulWidget {
   final void Function(List<Widget> actions)? onActionsChanged;
   const ShellScreen({super.key, this.onActionsChanged});
   @override
-  State<ShellScreen> createState() => _ShellScreenState();
+  State<ShellScreen> createState() => ShellScreenState();
 }
 
-class _ShellScreenState extends State<ShellScreen> with AutomaticKeepAliveClientMixin {
+class ShellScreenState extends State<ShellScreen> with AutomaticKeepAliveClientMixin {
   @override
   bool get wantKeepAlive => true;
+
+  void refreshActions() => _pushActions();
 
   final _inputCtrl = TextEditingController();
   final _scrollCtrl = ScrollController();
@@ -145,7 +147,9 @@ class _ShellScreenState extends State<ShellScreen> with AutomaticKeepAliveClient
     super.build(context);
     final adb = context.watch<AdbService>();
 
-    return Column(children: [
+    return Material(
+      color: AppTheme.bg0,
+      child: Column(children: [
         // Quick commands horizontal scroll
         SizedBox(
           height: 38,
@@ -284,7 +288,8 @@ class _ShellScreenState extends State<ShellScreen> with AutomaticKeepAliveClient
             ),
           ]),
         ),
-      ]);
+      ]),
+    );
   }
 }
 

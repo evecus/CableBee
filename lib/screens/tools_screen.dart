@@ -11,13 +11,15 @@ class ToolsScreen extends StatefulWidget {
   final void Function(List<Widget> actions)? onActionsChanged;
   const ToolsScreen({super.key, this.onActionsChanged});
   @override
-  State<ToolsScreen> createState() => _ToolsScreenState();
+  State<ToolsScreen> createState() => ToolsScreenState();
 }
 
-class _ToolsScreenState extends State<ToolsScreen>
+class ToolsScreenState extends State<ToolsScreen>
     with AutomaticKeepAliveClientMixin {
   @override
   bool get wantKeepAlive => true;
+
+  void refreshActions() => widget.onActionsChanged?.call([]);
 
   @override
   void initState() {

@@ -10,12 +10,14 @@ class FilesScreen extends StatefulWidget {
   final void Function(List<Widget> actions)? onActionsChanged;
   const FilesScreen({super.key, this.onActionsChanged});
   @override
-  State<FilesScreen> createState() => _FilesScreenState();
+  State<FilesScreen> createState() => FilesScreenState();
 }
 
-class _FilesScreenState extends State<FilesScreen> with AutomaticKeepAliveClientMixin {
+class FilesScreenState extends State<FilesScreen> with AutomaticKeepAliveClientMixin {
   @override
   bool get wantKeepAlive => true;
+
+  void refreshActions() => _pushActions();
 
   String _currentPath = '/sdcard';
   List<FileEntry> _entries = [];

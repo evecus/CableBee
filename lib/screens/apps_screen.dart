@@ -9,12 +9,14 @@ class AppsScreen extends StatefulWidget {
   final void Function(List<Widget> actions)? onActionsChanged;
   const AppsScreen({super.key, this.onActionsChanged});
   @override
-  State<AppsScreen> createState() => _AppsScreenState();
+  State<AppsScreen> createState() => AppsScreenState();
 }
 
-class _AppsScreenState extends State<AppsScreen> with AutomaticKeepAliveClientMixin, SingleTickerProviderStateMixin {
+class AppsScreenState extends State<AppsScreen> with AutomaticKeepAliveClientMixin, SingleTickerProviderStateMixin {
   @override
   bool get wantKeepAlive => true;
+
+  void refreshActions() => _pushActions();
 
   List<AppInfo> _apps = [];
   List<AppInfo> _filtered = [];

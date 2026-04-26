@@ -20,6 +20,13 @@ class _DeviceScreenState extends State<DeviceScreen> {
   int _tab = 0;
   List<Widget> _tabActions = [];
 
+  // GlobalKeys to call refreshActions() on each sub-screen
+  final _infoKey   = GlobalKey<DeviceInfoScreenState>();
+  final _shellKey  = GlobalKey<ShellScreenState>();
+  final _appsKey   = GlobalKey<AppsScreenState>();
+  final _filesKey  = GlobalKey<FilesScreenState>();
+  final _toolsKey  = GlobalKey<ToolsScreenState>();
+
   static const _tabs = [
     _TabItem(icon: Icons.info_outline_rounded,  label: '信息'),
     _TabItem(icon: Icons.terminal_rounded,       label: 'Shell'),
@@ -32,6 +39,23 @@ class _DeviceScreenState extends State<DeviceScreen> {
 
   void _onActionsChanged(List<Widget> actions) {
     if (mounted) setState(() => _tabActions = actions);
+  }
+
+  void _switchTab(int i) {
+    setState(() {
+      _tab = i;
+      _tabActions = [];
+    });
+    // Ask the now-visible screen to re-push its actions
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      switch (i) {
+        case 0: _infoKey.currentState?.refreshActions();  break;
+        case 1: _shellKey.currentState?.refreshActions(); break;
+        case 2: _appsKey.currentState?.refreshActions();  break;
+        case 3: _filesKey.currentState?.refreshActions(); break;
+        case 4: _toolsKey.currentState?.refreshActions(); break;
+      }
+    });
   }
 
   @override
@@ -68,11 +92,11 @@ class _DeviceScreenState extends State<DeviceScreen> {
       body: IndexedStack(
         index: _tab,
         children: [
-          DeviceInfoScreen(onActionsChanged: _onActionsChanged),
-          ShellScreen(onActionsChanged: _onActionsChanged),
-          AppsScreen(onActionsChanged: _onActionsChanged),
-          FilesScreen(onActionsChanged: _onActionsChanged),
-          ToolsScreen(onActionsChanged: _onActionsChanged),
+          DeviceInfoScreen(key: _infoKey,  onActionsChanged: _onActionsChanged),
+          ShellScreen     (key: _shellKey, onActionsChanged: _onActionsChanged),
+          AppsScreen      (key: _appsKey,  onActionsChanged: _onActionsChanged),
+          FilesScreen     (key: _filesKey, onActionsChanged: _onActionsChanged),
+          ToolsScreen     (key: _toolsKey, onActionsChanged: _onActionsChanged),
         ],
       ),
       bottomNavigationBar: Container(
@@ -90,12 +114,7 @@ class _DeviceScreenState extends State<DeviceScreen> {
                 final selected = _tab == i;
                 return Expanded(
                   child: InkWell(
-                    onTap: () {
-                      setState(() {
-                        _tab = i;
-                        _tabActions = [];
-                      });
-                    },
+                    onTap: () => _switchTab(i),
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 180),
                       curve: Curves.easeInOut,
