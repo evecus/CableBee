@@ -1,5 +1,5 @@
 // lib/screens/device_screen.dart
-// 底部导航栏支持左右滑动（SingleChildScrollView），容纳 7 个 Tab
+// 底部导航栏支持左右滑动，共 8 个 Tab
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -13,6 +13,7 @@ import 'files_screen.dart';
 import 'tools_screen.dart';
 import 'process_screen.dart';
 import 'remote_screen.dart';
+import 'controller_screen.dart';
 
 class DeviceScreen extends StatefulWidget {
   final AdbDevice device;
@@ -25,25 +26,29 @@ class _DeviceScreenState extends State<DeviceScreen> {
   int _tab = 0;
   List<Widget> _tabActions = [];
 
-  final _infoKey    = GlobalKey<DeviceInfoScreenState>();
-  final _shellKey   = GlobalKey<ShellScreenState>();
-  final _appsKey    = GlobalKey<AppsScreenState>();
-  final _filesKey   = GlobalKey<FilesScreenState>();
-  final _toolsKey   = GlobalKey<ToolsScreenState>();
-  final _procKey    = GlobalKey<ProcessScreenState>();
-  final _remoteKey  = GlobalKey<RemoteScreenState>();
+  final _infoKey       = GlobalKey<DeviceInfoScreenState>();
+  final _shellKey      = GlobalKey<ShellScreenState>();
+  final _appsKey       = GlobalKey<AppsScreenState>();
+  final _filesKey      = GlobalKey<FilesScreenState>();
+  final _toolsKey      = GlobalKey<ToolsScreenState>();
+  final _procKey       = GlobalKey<ProcessScreenState>();
+  final _remoteKey     = GlobalKey<RemoteScreenState>();
+  final _controllerKey = GlobalKey<ControllerScreenState>();
 
   static const _tabs = [
-    _TabItem(icon: Icons.info_outline_rounded,    label: '信息'),
-    _TabItem(icon: Icons.terminal_rounded,         label: 'Shell'),
-    _TabItem(icon: Icons.apps_rounded,             label: '应用'),
-    _TabItem(icon: Icons.folder_outlined,          label: '文件'),
-    _TabItem(icon: Icons.build_outlined,           label: '工具'),
-    _TabItem(icon: Icons.memory_rounded,           label: '进程'),
-    _TabItem(icon: Icons.cast_rounded,             label: '投屏'),
+    _TabItem(icon: Icons.info_outline_rounded,        label: '信息'),
+    _TabItem(icon: Icons.terminal_rounded,             label: 'Shell'),
+    _TabItem(icon: Icons.apps_rounded,                 label: '应用'),
+    _TabItem(icon: Icons.folder_outlined,              label: '文件'),
+    _TabItem(icon: Icons.build_outlined,               label: '工具'),
+    _TabItem(icon: Icons.memory_rounded,               label: '进程'),
+    _TabItem(icon: Icons.cast_rounded,                 label: '投屏'),
+    _TabItem(icon: Icons.gamepad_rounded,              label: '遥控'),
   ];
 
-  static const _tabTitles = ['信息', 'Shell', '应用', '文件', '工具', '进程管理', '远程控制'];
+  static const _tabTitles = [
+    '信息', 'Shell', '应用', '文件', '工具', '进程管理', '远程控制', '遥控器',
+  ];
 
   void _onActionsChanged(List<Widget> actions) {
     if (mounted) setState(() => _tabActions = actions);
@@ -56,13 +61,14 @@ class _DeviceScreenState extends State<DeviceScreen> {
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       switch (i) {
-        case 0: _infoKey.currentState?.refreshActions();   break;
-        case 1: _shellKey.currentState?.refreshActions();  break;
-        case 2: _appsKey.currentState?.refreshActions();   break;
-        case 3: _filesKey.currentState?.refreshActions();  break;
-        case 4: _toolsKey.currentState?.refreshActions();  break;
-        case 5: _procKey.currentState?.refreshActions();   break;
-        case 6: _remoteKey.currentState?.refreshActions(); break;
+        case 0: _infoKey.currentState?.refreshActions();       break;
+        case 1: _shellKey.currentState?.refreshActions();      break;
+        case 2: _appsKey.currentState?.refreshActions();       break;
+        case 3: _filesKey.currentState?.refreshActions();      break;
+        case 4: _toolsKey.currentState?.refreshActions();      break;
+        case 5: _procKey.currentState?.refreshActions();       break;
+        case 6: _remoteKey.currentState?.refreshActions();     break;
+        case 7: _controllerKey.currentState?.refreshActions(); break;
       }
     });
   }
@@ -102,13 +108,14 @@ class _DeviceScreenState extends State<DeviceScreen> {
       body: IndexedStack(
         index: _tab,
         children: [
-          DeviceInfoScreen(key: _infoKey,   onActionsChanged: _onActionsChanged),
-          ShellScreen     (key: _shellKey,  onActionsChanged: _onActionsChanged),
-          AppsScreen      (key: _appsKey,   onActionsChanged: _onActionsChanged),
-          FilesScreen     (key: _filesKey,  onActionsChanged: _onActionsChanged),
-          ToolsScreen     (key: _toolsKey,  onActionsChanged: _onActionsChanged),
-          ProcessScreen   (key: _procKey,   onActionsChanged: _onActionsChanged),
-          RemoteScreen    (key: _remoteKey, onActionsChanged: _onActionsChanged),
+          DeviceInfoScreen (key: _infoKey,       onActionsChanged: _onActionsChanged),
+          ShellScreen      (key: _shellKey,      onActionsChanged: _onActionsChanged),
+          AppsScreen       (key: _appsKey,       onActionsChanged: _onActionsChanged),
+          FilesScreen      (key: _filesKey,      onActionsChanged: _onActionsChanged),
+          ToolsScreen      (key: _toolsKey,      onActionsChanged: _onActionsChanged),
+          ProcessScreen    (key: _procKey,       onActionsChanged: _onActionsChanged),
+          RemoteScreen     (key: _remoteKey,     onActionsChanged: _onActionsChanged),
+          ControllerScreen (key: _controllerKey, onActionsChanged: _onActionsChanged),
         ],
       ),
       bottomNavigationBar: _ScrollableBottomNav(
@@ -144,7 +151,6 @@ class _ScrollableBottomNavState extends State<_ScrollableBottomNav> {
   @override
   void didUpdateWidget(_ScrollableBottomNav old) {
     super.didUpdateWidget(old);
-    // 切 tab 后自动将选中项滚到视野内
     if (old.selectedIndex != widget.selectedIndex) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToSelected());
     }
@@ -152,7 +158,6 @@ class _ScrollableBottomNavState extends State<_ScrollableBottomNav> {
 
   void _scrollToSelected() {
     if (!_scrollCtrl.hasClients) return;
-    // 每个 tab 宽度约 72px
     const itemW = 72.0;
     final target = widget.selectedIndex * itemW;
     final viewport = _scrollCtrl.position.viewportDimension;
@@ -199,7 +204,6 @@ class _ScrollableBottomNavState extends State<_ScrollableBottomNav> {
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        // 顶部指示条
                         AnimatedContainer(
                           duration: const Duration(milliseconds: 180),
                           width: selected ? 32 : 0,
@@ -210,11 +214,8 @@ class _ScrollableBottomNavState extends State<_ScrollableBottomNav> {
                             borderRadius: BorderRadius.circular(2),
                           ),
                         ),
-                        Icon(
-                          item.icon,
-                          size: 20,
-                          color: selected ? AppTheme.primary : AppTheme.textMuted,
-                        ),
+                        Icon(item.icon, size: 20,
+                          color: selected ? AppTheme.primary : AppTheme.textMuted),
                         const SizedBox(height: 3),
                         Text(
                           item.label,
