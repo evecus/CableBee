@@ -1061,7 +1061,7 @@ class _MultiActionSheet extends StatelessWidget {
             onTap: onDownload,
           ),
           ListTile(
-            leading: const Icon(Icons.drive_file_move_outline_rounded,
+            leading: const Icon(Icons.drive_file_move_rounded,
                 size: 20, color: AppTheme.primary),
             title: const Text('移动',
                 style: TextStyle(
