@@ -8,7 +8,8 @@ import '../utils/theme.dart';
 import '../widgets/common.dart';
 
 class ToolsScreen extends StatefulWidget {
-  const ToolsScreen({super.key});
+  final void Function(List<Widget> actions) onActionsChanged;
+  const ToolsScreen({super.key, required this.onActionsChanged});
   @override
   State<ToolsScreen> createState() => _ToolsScreenState();
 }
@@ -22,6 +23,15 @@ class _ToolsScreenState extends State<ToolsScreen>
   bool _takingScreenshot = false;
   String? _resultMsg;
   bool _resultOk = true;
+
+  @override
+  void initState() {
+    super.initState();
+    // 工具页无额外 actions
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      widget.onActionsChanged([]);
+    });
+  }
 
   // ── 结果提示 ────────────────────────────────────────────────────────────────
 
@@ -214,19 +224,9 @@ class _ToolsScreenState extends State<ToolsScreen>
   Widget build(BuildContext context) {
     super.build(context);
 
-    return Scaffold(
-      backgroundColor: AppTheme.bg0,
-      appBar: AppBar(
-        backgroundColor: AppTheme.bg0,
-        elevation: 0,
-        title: const Text('工具', style: TextStyle(
-          fontFamily: 'SpaceMono', fontSize: 16,
-          fontWeight: FontWeight.w700, color: AppTheme.textPrimary,
-        )),
-      ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 0, 16, 40),
-        children: [
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 40),
+      children: [
 
           // ── 结果提示条 ────────────────────────────────────────────
           if (_resultMsg != null) ...[
