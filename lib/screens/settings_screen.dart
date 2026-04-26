@@ -218,6 +218,62 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
 
+
+          // ── 文件管理 ──────────────────────────────────────────────
+          const SectionHeader(title: '文件管理'),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: TintedCard(
+              padding: EdgeInsets.zero,
+              child: Column(children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+                  child: Row(children: [
+                    Container(
+                      width: 36, height: 36,
+                      decoration: BoxDecoration(
+                        color: AppTheme.primary.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Icon(Icons.download_rounded, size: 18, color: AppTheme.primary),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('下载保存路径', style: TextStyle(
+                          fontFamily: 'SpaceMono', fontSize: 13,
+                          fontWeight: FontWeight.w600, color: AppTheme.textPrimary,
+                        )),
+                        Text(_downloadPath, style: const TextStyle(
+                          fontFamily: 'JetBrainsMono', fontSize: 11,
+                          color: AppTheme.textMuted,
+                        ), overflow: TextOverflow.ellipsis),
+                      ],
+                    )),
+                    IconButton(
+                      icon: const Icon(Icons.edit_rounded, size: 16, color: AppTheme.primary),
+                      onPressed: _editDownloadPath,
+                      tooltip: '修改路径',
+                    ),
+                  ]),
+                ),
+                const Divider(height: 1),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 10, 16, 10),
+                  child: Row(children: [
+                    Icon(Icons.info_outline_rounded, size: 14, color: AppTheme.textMuted),
+                    SizedBox(width: 8),
+                    Expanded(child: Text(
+                      '下载的文件会保存到以上路径，首次下载时自动创建目录。',
+                      style: TextStyle(fontFamily: 'JetBrainsMono', fontSize: 10, color: AppTheme.textMuted),
+                    )),
+                  ]),
+                ),
+              ]),
+            ),
+          ),
+
           // ── 行为 ──────────────────────────────────────────────────
           const SectionHeader(title: '行为'),
           Padding(
