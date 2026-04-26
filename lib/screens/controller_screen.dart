@@ -460,7 +460,7 @@ class _MousepadViewState extends State<_MousepadView> {
 
   Future<void> _loadDevInfo() async {
     final adb = context.read<AdbService>();
-    await adb.shell('wm size');
+    final res = await adb.shell('wm size');
     final m = RegExp(r'(\d+)x(\d+)').firstMatch(res.stdout);
     if (m != null) {
       setState(() {
