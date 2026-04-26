@@ -8,8 +8,8 @@ import '../utils/theme.dart';
 import '../widgets/common.dart';
 
 class ToolsScreen extends StatefulWidget {
-  final void Function(List<Widget> actions) onActionsChanged;
-  const ToolsScreen({super.key, required this.onActionsChanged});
+  final void Function(List<Widget> actions)? onActionsChanged;
+  const ToolsScreen({super.key, this.onActionsChanged});
   @override
   State<ToolsScreen> createState() => _ToolsScreenState();
 }
@@ -19,19 +19,18 @@ class _ToolsScreenState extends State<ToolsScreen>
   @override
   bool get wantKeepAlive => true;
 
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      widget.onActionsChanged?.call([]);
+    });
+  }
+
   String? _screenshotPath;
   bool _takingScreenshot = false;
   String? _resultMsg;
   bool _resultOk = true;
-
-  @override
-  void initState() {
-    super.initState();
-    // 工具页无额外 actions
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      widget.onActionsChanged([]);
-    });
-  }
 
   // ── 结果提示 ────────────────────────────────────────────────────────────────
 
@@ -225,8 +224,8 @@ class _ToolsScreenState extends State<ToolsScreen>
     super.build(context);
 
     return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 40),
-      children: [
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 40),
+        children: [
 
           // ── 结果提示条 ────────────────────────────────────────────
           if (_resultMsg != null) ...[
@@ -467,7 +466,6 @@ class _ToolsScreenState extends State<ToolsScreen>
           const SizedBox(height: 24),
         ],
       );
-    );
   }
 }
 

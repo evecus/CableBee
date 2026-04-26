@@ -6,14 +6,13 @@ import '../utils/theme.dart';
 import '../widgets/common.dart';
 
 class AppsScreen extends StatefulWidget {
-  final void Function(List<Widget> actions) onActionsChanged;
-  const AppsScreen({super.key, required this.onActionsChanged});
+  final void Function(List<Widget> actions)? onActionsChanged;
+  const AppsScreen({super.key, this.onActionsChanged});
   @override
   State<AppsScreen> createState() => _AppsScreenState();
 }
 
-class _AppsScreenState extends State<AppsScreen>
-    with AutomaticKeepAliveClientMixin, SingleTickerProviderStateMixin {
+class _AppsScreenState extends State<AppsScreen> with AutomaticKeepAliveClientMixin, SingleTickerProviderStateMixin {
   @override
   bool get wantKeepAlive => true;
 
@@ -25,18 +24,24 @@ class _AppsScreenState extends State<AppsScreen>
   final _searchCtrl = TextEditingController();
   String? _actionResult;
   String? _busyPackage;
+  late TabController _tabs;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    _tabs = TabController(length: 2, vsync: this);
+    _tabs.addListener(() {
+      setState(() {});
       _pushActions();
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
       _loadApps();
+      _pushActions();
     });
   }
 
   void _pushActions() {
-    widget.onActionsChanged([
+    widget.onActionsChanged?.call([
       IconButton(
         icon: Icon(
           _showSystem ? Icons.phonelink_rounded : Icons.phonelink_off_rounded,
@@ -45,8 +50,8 @@ class _AppsScreenState extends State<AppsScreen>
         tooltip: _showSystem ? '隐藏系统应用' : '显示系统应用',
         onPressed: () {
           setState(() => _showSystem = !_showSystem);
-          _pushActions();
           _loadApps();
+          _pushActions();
         },
       ),
       IconButton(
@@ -59,6 +64,7 @@ class _AppsScreenState extends State<AppsScreen>
 
   @override
   void dispose() {
+    _tabs.dispose();
     _searchCtrl.dispose();
     super.dispose();
   }
@@ -68,7 +74,10 @@ class _AppsScreenState extends State<AppsScreen>
     setState(() { _loading = true; _actionResult = null; });
     final apps = await adb.listPackages(includeSystem: _showSystem);
     apps.sort((a, b) => a.packageName.compareTo(b.packageName));
-    setState(() { _apps = apps; _loading = false; });
+    setState(() {
+      _apps = apps;
+      _loading = false;
+    });
     _applyFilter();
   }
 
@@ -91,79 +100,85 @@ class _AppsScreenState extends State<AppsScreen>
     setState(() { _loading = true; _actionResult = 'Installing ${result.files.single.name}...'; });
     final adb = context.read<AdbService>();
     final res = await adb.installApk(path);
-    setState(() { _loading = false; _actionResult = res.output; });
+    setState(() {
+      _loading = false;
+      _actionResult = res.output;
+    });
     if (res.isSuccess) _loadApps();
   }
 
   Future<void> _uninstall(AppInfo app) async {
     final ok = await showConfirmDialog(context,
       title: '卸载应用',
-      message: '确认卸载 ${app.packageName}？',
+      message: '确认卸载 \${app.packageName}？',
       confirmText: '卸载',
       destructive: true,
     );
     if (ok != true) return;
     setState(() { _busyPackage = app.packageName; });
     final res = await context.read<AdbService>().uninstall(app.packageName);
-    setState(() { _busyPackage = null; _actionResult = res.output; });
+    setState(() {
+      _busyPackage = null;
+      _actionResult = res.output;
+    });
     if (res.isSuccess) _loadApps();
   }
 
   Future<void> _forceStop(AppInfo app) async {
     setState(() { _busyPackage = app.packageName; });
     final res = await context.read<AdbService>().forceStop(app.packageName);
-    setState(() { _busyPackage = null; _actionResult = res.output; });
+    setState(() {
+      _busyPackage = null;
+      _actionResult = res.output;
+    });
   }
 
   Future<void> _clearData(AppInfo app) async {
     final ok = await showConfirmDialog(context,
       title: '清除数据',
-      message: '确认清除 ${app.packageName} 的全部数据？\n\n此操作不可撤销。',
+      message: '确认清除 \${app.packageName} 的全部数据？\n\n此操作不可撤销。',
       confirmText: '清除',
       destructive: true,
     );
     if (ok != true) return;
     setState(() { _busyPackage = app.packageName; });
     final res = await context.read<AdbService>().clearData(app.packageName);
-    setState(() { _busyPackage = null; _actionResult = res.output; });
+    setState(() {
+      _busyPackage = null;
+      _actionResult = res.output;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    final adb = context.watch<AdbService>();
 
-    return Stack(children: [
-      Column(children: [
-        // Search bar (was AppBar bottom)
+    return Scaffold(
+      backgroundColor: AppTheme.bg0,
+      body: Column(children: [
+        // Search bar
         Padding(
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
           child: TextField(
             controller: _searchCtrl,
             onChanged: (v) { _search = v; _applyFilter(); },
             decoration: InputDecoration(
-              hintText: '搜索包名 ...',
-              prefixIcon: const Icon(Icons.search_rounded, size: 18,
-                  color: AppTheme.textMuted),
+              hintText: '搜索包名...',
+              prefixIcon: const Icon(Icons.search_rounded, size: 18, color: AppTheme.textMuted),
               suffixIcon: _search.isNotEmpty
                   ? IconButton(
-                      icon: const Icon(Icons.close_rounded, size: 16,
-                          color: AppTheme.textMuted),
-                      onPressed: () {
-                        _searchCtrl.clear();
-                        _search = '';
-                        _applyFilter();
-                      },
+                      icon: const Icon(Icons.close_rounded, size: 16, color: AppTheme.textMuted),
+                      onPressed: () { _searchCtrl.clear(); _search = ''; _applyFilter(); },
                     )
                   : null,
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             ),
           ),
         ),
-
         if (_actionResult != null)
           Container(
-            margin: const EdgeInsets.fromLTRB(12, 4, 12, 0),
+            margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
               color: AppTheme.bg1,
@@ -171,8 +186,7 @@ class _AppsScreenState extends State<AppsScreen>
               border: Border.all(color: AppTheme.bg3),
             ),
             child: Row(children: [
-              const Icon(Icons.info_outline_rounded, size: 14,
-                  color: AppTheme.primary),
+              const Icon(Icons.info_outline_rounded, size: 14, color: AppTheme.primary),
               const SizedBox(width: 8),
               Expanded(child: Text(_actionResult!, style: const TextStyle(
                 fontFamily: 'JetBrainsMono', fontSize: 11,
@@ -180,14 +194,14 @@ class _AppsScreenState extends State<AppsScreen>
               ))),
               GestureDetector(
                 onTap: () => setState(() => _actionResult = null),
-                child: const Icon(Icons.close_rounded, size: 14,
-                    color: AppTheme.textMuted),
+                child: const Icon(Icons.close_rounded, size: 14, color: AppTheme.textMuted),
               ),
             ]),
           ),
 
+        // Count badge
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
           child: Row(children: [
             Text(
               '${_filtered.length} packages',
@@ -227,8 +241,7 @@ class _AppsScreenState extends State<AppsScreen>
                   : ListView.separated(
                       padding: const EdgeInsets.symmetric(vertical: 4),
                       itemCount: _filtered.length,
-                      separatorBuilder: (_, __) =>
-                          const Divider(height: 1, indent: 68),
+                      separatorBuilder: (_, __) => const Divider(height: 1, indent: 68),
                       itemBuilder: (ctx, i) {
                         final app = _filtered[i];
                         final busy = _busyPackage == app.packageName;
@@ -243,26 +256,18 @@ class _AppsScreenState extends State<AppsScreen>
                     ),
         ),
       ]),
-
-      // FAB
-      Positioned(
-        right: 16,
-        bottom: 16,
-        child: FloatingActionButton.extended(
-          onPressed: _installApk,
-          backgroundColor: AppTheme.primary,
-          foregroundColor: AppTheme.bg0,
-          icon: const Icon(Icons.install_mobile_rounded, size: 18),
-          label: const Text('Install APK', style: TextStyle(
-            fontFamily: 'SpaceMono', fontSize: 12, fontWeight: FontWeight.w700,
-          )),
-        ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _installApk,
+        backgroundColor: AppTheme.primary,
+        foregroundColor: AppTheme.bg0,
+        icon: const Icon(Icons.install_mobile_rounded, size: 18),
+        label: const Text('Install APK', style: TextStyle(
+          fontFamily: 'SpaceMono', fontSize: 12, fontWeight: FontWeight.w700,
+        )),
       ),
-    ]);
+    );
   }
 }
-
-// ── App Tile ──────────────────────────────────────────────────────────────────
 
 class _AppTile extends StatelessWidget {
   final AppInfo app;
@@ -272,12 +277,17 @@ class _AppTile extends StatelessWidget {
   final VoidCallback onClearData;
 
   const _AppTile({
-    required this.app, required this.busy,
-    required this.onUninstall, required this.onForceStop,
+    required this.app,
+    required this.busy,
+    required this.onUninstall,
+    required this.onForceStop,
     required this.onClearData,
   });
 
-  String get _shortName => app.packageName.split('.').last;
+  String get _shortName {
+    final parts = app.packageName.split('.');
+    return parts.last;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -298,10 +308,13 @@ class _AppTile extends StatelessWidget {
           ),
         )),
       ),
-      title: Text(_shortName, style: const TextStyle(
-        fontFamily: 'SpaceMono', fontSize: 13,
-        fontWeight: FontWeight.w600, color: AppTheme.textPrimary,
-      )),
+      title: Text(
+        _shortName,
+        style: const TextStyle(
+          fontFamily: 'SpaceMono', fontSize: 13,
+          fontWeight: FontWeight.w600, color: AppTheme.textPrimary,
+        ),
+      ),
       subtitle: Text(
         app.packageName,
         style: const TextStyle(
@@ -325,7 +338,7 @@ class _AppTile extends StatelessWidget {
                 side: const BorderSide(color: AppTheme.bg3),
               ),
               icon: const Icon(Icons.more_vert_rounded,
-                  size: 18, color: AppTheme.textMuted),
+                size: 18, color: AppTheme.textMuted),
               onSelected: (v) {
                 if (v == 'uninstall') onUninstall();
                 if (v == 'stop') onForceStop();
@@ -342,14 +355,16 @@ class _AppTile extends StatelessWidget {
   }
 
   PopupMenuItem<String> _menuItem(
-      String value, IconData icon, String label, Color color) {
+    String value, IconData icon, String label, Color color,
+  ) {
     return PopupMenuItem(
       value: value,
       child: Row(children: [
         Icon(icon, size: 16, color: color),
         const SizedBox(width: 10),
         Text(label, style: TextStyle(
-          fontFamily: 'SpaceMono', fontSize: 12, color: color,
+          fontFamily: 'SpaceMono', fontSize: 12,
+          color: color,
         )),
       ]),
     );

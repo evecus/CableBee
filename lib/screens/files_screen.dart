@@ -7,14 +7,13 @@ import '../widgets/common.dart';
 import '../widgets/local_file_picker.dart';
 
 class FilesScreen extends StatefulWidget {
-  final void Function(List<Widget> actions) onActionsChanged;
-  const FilesScreen({super.key, required this.onActionsChanged});
+  final void Function(List<Widget> actions)? onActionsChanged;
+  const FilesScreen({super.key, this.onActionsChanged});
   @override
   State<FilesScreen> createState() => _FilesScreenState();
 }
 
-class _FilesScreenState extends State<FilesScreen>
-    with AutomaticKeepAliveClientMixin {
+class _FilesScreenState extends State<FilesScreen> with AutomaticKeepAliveClientMixin {
   @override
   bool get wantKeepAlive => true;
 
@@ -29,13 +28,13 @@ class _FilesScreenState extends State<FilesScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _pushActions();
       _loadDir(_currentPath);
+      _pushActions();
     });
   }
 
   void _pushActions() {
-    widget.onActionsChanged([
+    widget.onActionsChanged?.call([
       IconButton(
         icon: const Icon(Icons.refresh_rounded, size: 20),
         onPressed: () => _loadDir(_currentPath),
@@ -46,7 +45,7 @@ class _FilesScreenState extends State<FilesScreen>
 
   Future<void> _loadDir(String path) async {
     final adb = context.read<AdbService>();
-    setState(() => _loading = true);
+    setState(() { _loading = true; });
     final entries = await adb.listFiles(path);
     entries.sort((a, b) {
       if (a.isDirectory && !b.isDirectory) return -1;
@@ -69,7 +68,9 @@ class _FilesScreenState extends State<FilesScreen>
 
   void _navigateTo(String path) {
     final idx = _breadcrumbs.indexOf(path);
-    if (idx >= 0) setState(() => _breadcrumbs.removeRange(idx + 1, _breadcrumbs.length));
+    if (idx >= 0) {
+      setState(() => _breadcrumbs.removeRange(idx + 1, _breadcrumbs.length));
+    }
     _loadDir(path);
   }
 
@@ -81,13 +82,20 @@ class _FilesScreenState extends State<FilesScreen>
   }
 
   Future<void> _pushFile() async {
-    final results = await showLocalFilePicker(context, allowMultiple: false, allowFolders: false);
+    final results = await showLocalFilePicker(
+      context,
+      allowMultiple: false,
+      allowFolders: false,
+    );
     if (results == null || results.isEmpty) return;
     final localPath = results.first;
     final fileName = localPath.split('/').last;
     final remotePath = '$_currentPath/$fileName';
 
-    setState(() { _transferring = true; _transferMessage = 'Pushing $fileName...'; });
+    setState(() {
+      _transferring = true;
+      _transferMessage = 'Pushing $fileName...';
+    });
     final res = await context.read<AdbService>().push(localPath, remotePath);
     setState(() {
       _transferring = false;
@@ -100,27 +108,41 @@ class _FilesScreenState extends State<FilesScreen>
     final dir = await getExternalStorageDirectory() ??
         await getApplicationDocumentsDirectory();
     final savePath = '${dir.path}/${entry.name}';
-    setState(() { _transferring = true; _transferMessage = 'Pulling ${entry.name}...'; });
+
+    setState(() {
+      _transferring = true;
+      _transferMessage = 'Pulling ${entry.name}...';
+    });
     final remotePath = '$_currentPath/${entry.name}';
     final res = await context.read<AdbService>().pull(remotePath, savePath);
     setState(() {
       _transferring = false;
-      _transferMessage = res.isSuccess ? '✓ Saved to $savePath' : '✗ ${res.stderr}';
+      _transferMessage = res.isSuccess
+          ? '✓ Saved to $savePath'
+          : '✗ ${res.stderr}';
     });
   }
 
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    final adb = context.watch<AdbService>();
 
     return PopScope(
       canPop: _breadcrumbs.length <= 1,
-      onPopInvoked: (didPop) { if (!didPop) _navigateUp(); },
-      child: Stack(children: [
-        Column(children: [
-          // Breadcrumb bar (was AppBar bottom)
-          _BreadcrumbBar(crumbs: _breadcrumbs, onTap: _navigateTo),
-
+      onPopInvoked: (didPop) {
+        if (!didPop) _navigateUp();
+      },
+      child: Scaffold(
+        backgroundColor: AppTheme.bg0,
+        body: Column(children: [
+          // Breadcrumb bar (replaces AppBar bottom)
+          _BreadcrumbBar(
+            crumbs: _breadcrumbs,
+            onTap: _navigateTo,
+          ),
+          const Divider(height: 1),
+          // Transfer status bar
           if (_transferMessage != null)
             Container(
               margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
@@ -156,12 +178,12 @@ class _FilesScreenState extends State<FilesScreen>
                 if (!_transferring)
                   GestureDetector(
                     onTap: () => setState(() => _transferMessage = null),
-                    child: const Icon(Icons.close_rounded, size: 14,
-                        color: AppTheme.textMuted),
+                    child: const Icon(Icons.close_rounded, size: 14, color: AppTheme.textMuted),
                   ),
               ]),
             ),
 
+          // File list
           Expanded(
             child: _loading
                 ? const CbeeLoader(message: '读取目录...')
@@ -174,34 +196,36 @@ class _FilesScreenState extends State<FilesScreen>
                     : ListView.separated(
                         padding: const EdgeInsets.symmetric(vertical: 4),
                         itemCount: _entries.length,
-                        separatorBuilder: (_, __) =>
-                            const Divider(height: 1, indent: 60),
+                        separatorBuilder: (_, __) => const Divider(height: 1, indent: 60),
                         itemBuilder: (ctx, i) {
                           final entry = _entries[i];
                           return _FileRow(
                             entry: entry,
-                            onTap: entry.isDirectory ? () => _navigate(entry) : null,
-                            onPull: entry.isDirectory ? null : () => _pullFile(entry),
+                            onTap: entry.isDirectory
+                                ? () => _navigate(entry)
+                                : null,
+                            onPull: entry.isDirectory
+                                ? null
+                                : () => _pullFile(entry),
                           );
                         },
                       ),
           ),
         ]),
-
-        // FAB
-        Positioned(
-          right: 16,
-          bottom: 16,
-          child: FloatingActionButton.small(
-            heroTag: 'push',
-            onPressed: _pushFile,
-            backgroundColor: AppTheme.primary,
-            foregroundColor: AppTheme.bg0,
-            tooltip: '推送文件到设备',
-            child: const Icon(Icons.upload_rounded, size: 18),
-          ),
+        floatingActionButton: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            FloatingActionButton.small(
+              heroTag: 'push',
+              onPressed: _pushFile,
+              backgroundColor: AppTheme.primary,
+              foregroundColor: AppTheme.bg0,
+              tooltip: '推送文件到设备',
+              child: const Icon(Icons.upload_rounded, size: 18),
+            ),
+          ],
         ),
-      ]),
+      ),
     );
   }
 }
@@ -211,35 +235,38 @@ class _FilesScreenState extends State<FilesScreen>
 class _BreadcrumbBar extends StatelessWidget {
   final List<String> crumbs;
   final void Function(String) onTap;
+
   const _BreadcrumbBar({required this.crumbs, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return SizedBox(
       height: 40,
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: AppTheme.bg3, width: 0.5)),
-      ),
       child: ListView(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         children: crumbs.asMap().entries.expand((e) {
           final isLast = e.key == crumbs.length - 1;
-          final label = e.key == 0 ? e.value : e.value.split('/').last;
+          final label = e.key == 0
+              ? e.value
+              : e.value.split('/').last;
           return [
             GestureDetector(
               onTap: isLast ? null : () => onTap(e.value),
-              child: Text(label, style: TextStyle(
-                fontFamily: 'JetBrainsMono', fontSize: 12,
-                color: isLast ? AppTheme.textPrimary : AppTheme.textMuted,
-                fontWeight: isLast ? FontWeight.w600 : FontWeight.w400,
-              )),
+              child: Text(
+                label,
+                style: TextStyle(
+                  fontFamily: 'JetBrainsMono', fontSize: 12,
+                  color: isLast ? AppTheme.textPrimary : AppTheme.textMuted,
+                  fontWeight: isLast ? FontWeight.w600 : FontWeight.w400,
+                ),
+              ),
             ),
             if (!isLast)
               const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 4),
                 child: Icon(Icons.chevron_right_rounded,
-                    size: 14, color: AppTheme.textMuted),
+                  size: 14, color: AppTheme.textMuted),
               ),
           ];
         }).toList(),
@@ -254,6 +281,7 @@ class _FileRow extends StatelessWidget {
   final FileEntry entry;
   final VoidCallback? onTap;
   final VoidCallback? onPull;
+
   const _FileRow({required this.entry, this.onTap, this.onPull});
 
   IconData get _icon {
@@ -308,14 +336,12 @@ class _FileRow extends StatelessWidget {
       ),
       trailing: onPull != null
           ? IconButton(
-              icon: const Icon(Icons.download_rounded, size: 18,
-                  color: AppTheme.primary),
+              icon: const Icon(Icons.download_rounded, size: 18, color: AppTheme.primary),
               onPressed: onPull,
               tooltip: '拉取到本机',
             )
           : entry.isDirectory
-              ? const Icon(Icons.chevron_right_rounded, size: 16,
-                  color: AppTheme.textMuted)
+              ? const Icon(Icons.chevron_right_rounded, size: 16, color: AppTheme.textMuted)
               : null,
       onTap: onTap,
     );

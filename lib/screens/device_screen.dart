@@ -18,22 +18,20 @@ class DeviceScreen extends StatefulWidget {
 
 class _DeviceScreenState extends State<DeviceScreen> {
   int _tab = 0;
-  List<Widget> _currentActions = [];
+  List<Widget> _tabActions = [];
 
   static const _tabs = [
-    _TabItem(icon: Icons.info_outline_rounded,   label: '信息'),
-    _TabItem(icon: Icons.terminal_rounded,        label: 'Shell'),
-    _TabItem(icon: Icons.apps_rounded,            label: '应用'),
-    _TabItem(icon: Icons.folder_outlined,         label: '文件'),
-    _TabItem(icon: Icons.build_outlined,          label: '工具'),
+    _TabItem(icon: Icons.info_outline_rounded,  label: '信息'),
+    _TabItem(icon: Icons.terminal_rounded,       label: 'Shell'),
+    _TabItem(icon: Icons.apps_rounded,           label: '应用'),
+    _TabItem(icon: Icons.folder_outlined,        label: '文件'),
+    _TabItem(icon: Icons.build_outlined,         label: '工具'),
   ];
 
-  static const _titles = ['信息', 'Shell', '应用', '文件', '工具'];
+  static const _tabTitles = ['信息', 'Shell', '应用', '文件', '工具'];
 
   void _onActionsChanged(List<Widget> actions) {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) setState(() => _currentActions = actions);
-    });
+    if (mounted) setState(() => _tabActions = actions);
   }
 
   @override
@@ -52,19 +50,18 @@ class _DeviceScreenState extends State<DeviceScreen> {
         backgroundColor: AppTheme.bg0,
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 18,
-              color: AppTheme.textSecondary),
+          icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 18, color: AppTheme.textSecondary),
           onPressed: () => Navigator.pop(context),
         ),
         title: Text(
-          _titles[_tab],
+          _tabTitles[_tab],
           style: const TextStyle(
             fontFamily: 'SpaceMono', fontSize: 16,
             fontWeight: FontWeight.w700, color: AppTheme.textPrimary,
           ),
         ),
         actions: [
-          ..._currentActions,
+          ..._tabActions,
           const SizedBox(width: 4),
         ],
       ),
@@ -96,7 +93,7 @@ class _DeviceScreenState extends State<DeviceScreen> {
                     onTap: () {
                       setState(() {
                         _tab = i;
-                        _currentActions = [];
+                        _tabActions = [];
                       });
                     },
                     child: AnimatedContainer(
