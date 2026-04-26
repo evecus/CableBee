@@ -153,9 +153,7 @@ class AppsScreenState extends State<AppsScreen>
   }
 
   Future<void> _loadAppLabels(AdbService adb, List<AppInfoEx> apps) async {
-    // 使用 dumpsys package 批量获取 label（简化方案）
-    // 对大量应用，通过 aapt 逐个查询太慢，这里用包名最后部分作为 fallback
-    // 尝试用 cmd package list packages --show-labels（部分系统支持）
+    // 方案一：cmd package list packages --show-labels（部分系统支持）
     try {
       final res = await adb.shell('cmd package list packages --show-labels 2>&1');
       if (res.isSuccess && res.stdout.contains('package:')) {
@@ -172,11 +170,35 @@ class AppsScreenState extends State<AppsScreen>
           for (final app in apps) {
             app.appLabel = labelMap[app.packageName];
           }
-          return;
+          // 如果大部分有标签就认为成功
+          final labeled = apps.where((a) => a.appLabel != null).length;
+          if (labeled > apps.length ~/ 2) return;
         }
       }
     } catch (_) {}
-    // fallback: labels stay null, displayName uses shortName
+
+    // 方案二：通过 dumpsys package 逐个解析 applicationInfo 的 nonLocalizedLabel
+    // 批量执行以减少往返次数（每批 10 个）
+    const batchSize = 10;
+    for (var i = 0; i < apps.length; i += batchSize) {
+      final batch = apps.skip(i).take(batchSize).toList();
+      final cmds = batch
+          .map((a) => 'dumpsys package ${a.packageName} 2>/dev/null | grep -m1 "nonLocalizedLabel\\|labelRes\\|label="')
+          .join('; echo "---"; ');
+      try {
+        final res = await adb.shell(cmds);
+        final segments = res.stdout.split('---');
+        for (var j = 0; j < batch.length && j < segments.length; j++) {
+          final seg = segments[j];
+          // Try nonLocalizedLabel first
+          final nlMatch = RegExp(r'nonLocalizedLabel=(.+?)(?:\s|$)').firstMatch(seg);
+          if (nlMatch != null && nlMatch.group(1) != 'null') {
+            batch[j].appLabel = nlMatch.group(1)!.trim();
+          }
+        }
+      } catch (_) {}
+    }
+    // 没有标签的 app 保持 null，displayName 会使用 _shortName（包名最后一段）
   }
 
   // ── 过滤与排序 ──────────────────────────────────────────────────────────────
