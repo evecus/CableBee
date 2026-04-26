@@ -37,17 +37,17 @@ class _DeviceScreenState extends State<DeviceScreen> {
 
   static const _tabs = [
     _TabItem(icon: Icons.info_outline_rounded,        label: '信息'),
-    _TabItem(icon: Icons.terminal_rounded,             label: 'Shell'),
+    _TabItem(icon: Icons.build_outlined,               label: '工具'),
     _TabItem(icon: Icons.apps_rounded,                 label: '应用'),
     _TabItem(icon: Icons.folder_outlined,              label: '文件'),
-    _TabItem(icon: Icons.build_outlined,               label: '工具'),
     _TabItem(icon: Icons.memory_rounded,               label: '进程'),
-    _TabItem(icon: Icons.cast_rounded,                 label: '投屏'),
     _TabItem(icon: Icons.gamepad_rounded,              label: '遥控'),
+    _TabItem(icon: Icons.cast_rounded,                 label: '投屏'),
+    _TabItem(icon: Icons.terminal_rounded,             label: 'Shell'),
   ];
 
   static const _tabTitles = [
-    '信息', 'Shell', '应用', '文件', '工具', '进程管理', '远程控制', '遥控器',
+    '信息', '工具', '应用', '文件', '进程管理', '遥控器', '远程控制', 'Shell',
   ];
 
   void _onActionsChanged(List<Widget> actions) {
@@ -62,13 +62,13 @@ class _DeviceScreenState extends State<DeviceScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       switch (i) {
         case 0: _infoKey.currentState?.refreshActions();       break;
-        case 1: _shellKey.currentState?.refreshActions();      break;
+        case 1: _toolsKey.currentState?.refreshActions();      break;
         case 2: _appsKey.currentState?.refreshActions();       break;
         case 3: _filesKey.currentState?.refreshActions();      break;
-        case 4: _toolsKey.currentState?.refreshActions();      break;
-        case 5: _procKey.currentState?.refreshActions();       break;
+        case 4: _procKey.currentState?.refreshActions();       break;
+        case 5: _controllerKey.currentState?.refreshActions(); break;
         case 6: _remoteKey.currentState?.refreshActions();     break;
-        case 7: _controllerKey.currentState?.refreshActions(); break;
+        case 7: _shellKey.currentState?.refreshActions();      break;
       }
     });
   }
@@ -109,13 +109,13 @@ class _DeviceScreenState extends State<DeviceScreen> {
         index: _tab,
         children: [
           DeviceInfoScreen (key: _infoKey,       onActionsChanged: _onActionsChanged),
-          ShellScreen      (key: _shellKey,      onActionsChanged: _onActionsChanged),
+          ToolsScreen      (key: _toolsKey,      onActionsChanged: _onActionsChanged),
           AppsScreen       (key: _appsKey,       onActionsChanged: _onActionsChanged),
           FilesScreen      (key: _filesKey,      onActionsChanged: _onActionsChanged),
-          ToolsScreen      (key: _toolsKey,      onActionsChanged: _onActionsChanged),
           ProcessScreen    (key: _procKey,       onActionsChanged: _onActionsChanged),
-          RemoteScreen     (key: _remoteKey,     onActionsChanged: _onActionsChanged),
           ControllerScreen (key: _controllerKey, onActionsChanged: _onActionsChanged),
+          RemoteScreen     (key: _remoteKey,     onActionsChanged: _onActionsChanged),
+          ShellScreen      (key: _shellKey,      onActionsChanged: _onActionsChanged),
         ],
       ),
       bottomNavigationBar: _ScrollableBottomNav(
