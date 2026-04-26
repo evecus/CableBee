@@ -1,11 +1,85 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/adb_service.dart';
 import '../utils/theme.dart';
 import '../widgets/common.dart';
 
-class SettingsScreen extends StatelessWidget {
+class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  String _downloadPath = '/sdcard/download/cablebee';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPrefs();
+  }
+
+  Future<void> _loadPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _downloadPath =
+          prefs.getString('download_path') ?? '/sdcard/download/cablebee';
+    });
+  }
+
+  Future<void> _setDownloadPath(String path) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('download_path', path);
+    setState(() => _downloadPath = path);
+  }
+
+  void _editDownloadPath() {
+    final ctrl = TextEditingController(text: _downloadPath);
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppTheme.bg1,
+        title: const Text('下载保存路径',
+            style: TextStyle(
+              color: AppTheme.textPrimary,
+              fontFamily: 'SpaceMono',
+              fontSize: 14,
+            )),
+        content: TextField(
+          controller: ctrl,
+          style: const TextStyle(
+            fontFamily: 'JetBrainsMono',
+            fontSize: 12,
+            color: AppTheme.textPrimary,
+          ),
+          decoration: const InputDecoration(
+            labelText: '设备路径',
+            labelStyle: TextStyle(color: AppTheme.textMuted, fontSize: 12),
+            hintText: '/sdcard/download/cablebee',
+            hintStyle: TextStyle(color: AppTheme.textMuted, fontSize: 12),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消',
+                style: TextStyle(color: AppTheme.textMuted)),
+          ),
+          FilledButton(
+            style:
+                FilledButton.styleFrom(backgroundColor: AppTheme.primary),
+            onPressed: () {
+              final v = ctrl.text.trim();
+              if (v.isNotEmpty) _setDownloadPath(v);
+              Navigator.pop(context);
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
