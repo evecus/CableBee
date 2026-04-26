@@ -110,21 +110,6 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     }
   }
-    final result = await context.read<AdbService>().connect(host, port: port);
-    final ok = result.isSuccess;
-    setState(() {
-      _connecting = false;
-      _connectMsg = ok ? null : result.stderr;
-    });
-
-    if (ok) {
-      await _saveHistory('$host:$port');
-      // 连接成功：仅刷新列表，设备出现在"已连接"区域，不自动跳转
-      if (mounted) {
-        context.read<AdbService>().refreshDevices();
-      }
-    }
-  }
 
   /// 断开指定设备
   Future<void> _disconnect(AdbDevice device) async {
@@ -330,7 +315,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       )
                     : const Icon(Icons.cable_rounded, size: 16),
-                label: Text(_connecting ? '等待授权...' : '连接'),
+                label: Text(_connecting ? '连接中...' : '连接'),
                 style: FilledButton.styleFrom(
                   backgroundColor: AppTheme.primary,
                   foregroundColor: AppTheme.bg0,
