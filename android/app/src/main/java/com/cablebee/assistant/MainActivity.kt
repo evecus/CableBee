@@ -167,6 +167,32 @@ class MainActivity : FlutterActivity() {
                             if (out.contains("connected") || out.contains("already connected")) {
                                 connectedSerials.add(serial)
                                 ui { result.success(serial) }
+                            } else if (out.contains("offline") || out.contains("unauthorized") ||
+                                       out.contains("failed to authenticate") || out.contains("failed to connect")) {
+                                // 设备可能正在等待用户授权 USB 调试
+                                // 轮询 adb devices，最多等待 30 秒
+                                Log.i(TAG, "connect: device offline/unauthorized, waiting for authorization... serial=$serial")
+                                var authorized = false
+                                repeat(30) { attempt ->
+                                    if (authorized) return@repeat
+                                    Thread.sleep(1_000)
+                                    // 重试 connect，触发授权弹窗（如果设备还未弹出）
+                                    if (attempt % 5 == 0) {
+                                        adb("connect", serial, timeoutMs = 5_000)
+                                    }
+                                    val devR = adb("devices")
+                                    val isOnline = devR.stdout.lines()
+                                        .any { it.startsWith(serial) && it.contains("\tdevice") }
+                                    if (isOnline) {
+                                        authorized = true
+                                        connectedSerials.add(serial)
+                                        Log.i(TAG, "connect: authorized after ${attempt + 1}s")
+                                        ui { result.success(serial) }
+                                    }
+                                }
+                                if (!authorized) {
+                                    ui { result.error("CONNECT_FAILED", "授权超时，请在设备上点击「允许 USB 调试」后重试", null) }
+                                }
                             } else {
                                 ui { result.error("CONNECT_FAILED", r.output, null) }
                             }
