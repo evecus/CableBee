@@ -72,18 +72,21 @@ class ProcessScreenState extends State<ProcessScreen>
       if (m.group(1) == 'MemAvailable') availKb = kb;
     }
 
-    // ② 进程内存：dumpsys meminfo 简洁模式
+    // ② 进程内存：解析 dumpsys meminfo "Total PSS by process" 段
+    // 行格式:  "   166,712K: system_server (pid 659)"
+    // 用 sed 提取：包名($2) 和内存KB($1去掉K:和逗号)
     final procRes = await adb.shell(
-        'dumpsys meminfo -a 2>/dev/null | grep -E "^\\s+[0-9]" | '
-        "awk '{print \$NF, \$1}' | sort -rn -k2 | head -40");
+        r"dumpsys meminfo 2>/dev/null | grep -E '^\s+[0-9,]+K:' | "
+        r"sed 's/,//g; s/K://' | awk '{kb=$1; pkg=$2; if(pkg~/\(/)pkg=$2; print pkg, kb}' | "
+        "sort -rn -k2 | head -40");
 
     final procs = <_ProcInfo>[];
     for (final line in procRes.stdout.split('\n')) {
       final parts = line.trim().split(RegExp(r'\s+'));
       if (parts.length < 2) continue;
-      final pkg = parts[0];
+      final pkg = parts[0].replaceAll(RegExp(r'[()]'), '').trim();
       final kb  = int.tryParse(parts[1]) ?? 0;
-      if (kb <= 0 || pkg.isEmpty) continue;
+      if (kb <= 0 || pkg.isEmpty || pkg == '(pid') continue;
       procs.add(_ProcInfo(pkg: pkg, kbRss: kb));
     }
 
@@ -227,7 +230,8 @@ class ProcessScreenState extends State<ProcessScreen>
                                 child: Icon(icon, size: 20, color: iconColor),
                               ),
                               title: Text(
-                                p.pkg.split('.').last, // 短名
+                                // 如果包名含点则取最后一段作为短名，否则直接用包名
+                                p.pkg.contains('.') ? p.pkg.split('.').last : p.pkg,
                                 style: const TextStyle(
                                   fontFamily: 'SpaceMono', fontSize: 13,
                                   color: AppTheme.textPrimary,
