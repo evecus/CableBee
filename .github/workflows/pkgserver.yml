@@ -1,10 +1,6 @@
-name: Build pkgserver.dex
+name: pkgserver
 
 on:
-  push:
-    paths:
-      - 'src/**/*.java'                        # 修复①：路径改为实际的 src/
-      - '.github/workflows/main.yml'           # 修复②：文件名对应 main.yml
   workflow_dispatch:
 
 jobs:
