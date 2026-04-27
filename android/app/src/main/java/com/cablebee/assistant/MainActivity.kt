@@ -2,10 +2,6 @@ package com.cablebee.assistant
 
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.drawable.BitmapDrawable
-import android.graphics.drawable.Drawable
 import android.hardware.usb.UsbManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -13,7 +9,6 @@ import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.*
 import android.util.Log
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.concurrent.TimeUnit
 
@@ -309,34 +304,22 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
 
-                    // 返回本机已安装应用列表（包名、标签、APK路径、图标字节）
+                    // 返回本机已安装应用列表（包名、标签、APK路径，不含图标）
                     "getInstalledApps" -> {
                         scope.launch {
                             try {
                                 val pm = packageManager
-                                val flags = if (android.os.Build.VERSION.SDK_INT >= 33)
-                                    PackageManager.GET_META_DATA
-                                else
-                                    @Suppress("DEPRECATION") PackageManager.GET_META_DATA
-                                val packages = pm.getInstalledPackages(flags)
+                                val packages = pm.getInstalledPackages(0)
 
                                 val appList = packages.mapNotNull { pkgInfo ->
                                     try {
                                         val appInfo = pkgInfo.applicationInfo ?: return@mapNotNull null
                                         val label = pm.getApplicationLabel(appInfo).toString()
                                         val apkPath = appInfo.sourceDir ?: return@mapNotNull null
-
-                                        // 获取图标，转为PNG字节
-                                        val iconBytes: List<Int>? = try {
-                                            val drawable = pm.getApplicationIcon(appInfo)
-                                            drawableToPngBytes(drawable)
-                                        } catch (_: Exception) { null }
-
                                         mapOf(
                                             "packageName" to pkgInfo.packageName,
                                             "label"       to label,
                                             "apkPath"     to apkPath,
-                                            "icon"        to iconBytes
                                         )
                                     } catch (_: Exception) { null }
                                 }
@@ -376,25 +359,6 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
-    }
-
-    // ── 工具函数：Drawable → PNG 字节列表 ────────────────────────────────────
-
-    private fun drawableToPngBytes(drawable: Drawable): List<Int> {
-        val bitmap = if (drawable is BitmapDrawable && drawable.bitmap != null) {
-            drawable.bitmap
-        } else {
-            val w = drawable.intrinsicWidth.takeIf { it > 0 } ?: 48
-            val h = drawable.intrinsicHeight.takeIf { it > 0 } ?: 48
-            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bmp)
-            drawable.setBounds(0, 0, canvas.width, canvas.height)
-            drawable.draw(canvas)
-            bmp
-        }
-        val stream = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.PNG, 85, stream)
-        return stream.toByteArray().map { it.toInt() and 0xFF }
     }
 
     override fun onNewIntent(intent: Intent) {
