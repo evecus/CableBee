@@ -9,7 +9,7 @@ import '../services/pkg_server_service.dart';
 import '../utils/theme.dart';
 import '../widgets/common.dart';
 import '../widgets/local_file_picker.dart';
-import 'local_apps_picker.dart';
+import '../widgets/local_apps_picker.dart';
 
 // ── 排序方式枚举 ──────────────────────────────────────────────────────────────
 
