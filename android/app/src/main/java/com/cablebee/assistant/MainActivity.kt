@@ -21,10 +21,13 @@ class MainActivity : FlutterActivity() {
         private const val USB_EVENTS         = "com.cablebee/usb_events"
         private const val ADB_CHANNEL        = "com.cablebee/adb"
         private const val LOCAL_APPS_CHANNEL = "com.cablebee.assistant/local_apps"
+        private const val SCRCPY_METHOD      = ScrcpyChannel.METHOD_CHANNEL
+        private const val SCRCPY_EVENTS      = ScrcpyChannel.EVENT_CHANNEL
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var usbEventSink: EventChannel.EventSink? = null
+    private var scrcpyChannel: ScrcpyChannel? = null
 
     private lateinit var adbBin: File
     private lateinit var fastbootBin: File
@@ -359,6 +362,24 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        // ── SCRCPY ────────────────────────────────────────────────────────────
+        val serverBytes = try {
+            assets.open("scrcpy-server").use { it.readBytes() }
+        } catch (_: Exception) { ByteArray(0) }
+
+        scrcpyChannel = ScrcpyChannel(
+            adbExec         = adbBin.absolutePath,
+            textureRegistry = flutterEngine.renderer,
+            serverBytes     = serverBytes,
+            scope           = scope,
+        )
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, SCRCPY_METHOD)
+            .setMethodCallHandler(scrcpyChannel!!.methodHandler)
+
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, SCRCPY_EVENTS)
+            .setStreamHandler(scrcpyChannel!!.streamHandler)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -370,5 +391,11 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onResume() { super.onResume(); intent?.let { onNewIntent(it) } }
-    override fun onDestroy() { scope.cancel(); super.onDestroy() }
+    override fun onDestroy() {
+        scrcpyChannel?.let {
+            // stop 内部会自行 release textureEntry
+        }
+        scope.cancel()
+        super.onDestroy()
+    }
 }
