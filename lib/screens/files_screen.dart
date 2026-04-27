@@ -2,7 +2,6 @@ import 'dart:io';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -45,24 +44,12 @@ class FilesScreenState extends State<FilesScreen>
   bool _multiSelect = false;
   final Set<String> _selected = {};
 
-  // 默认下载路径
-  String _downloadPath = '/sdcard/download/cablebee';
-
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      await _loadPrefs();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
       _loadDir(_currentPath);
       _pushActions();
-    });
-  }
-
-  Future<void> _loadPrefs() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      _downloadPath =
-          prefs.getString('download_path') ?? '/sdcard/download/cablebee';
     });
   }
 
@@ -81,14 +68,10 @@ class FilesScreenState extends State<FilesScreen>
   }
 
 
-  /// 读取设置中的本机保存路径，fallback 到系统下载目录
+  /// 读取设置中的本机默认保存路径
   Future<String> _localSaveDir() async {
     final prefs = await SharedPreferences.getInstance();
-    final saved = prefs.getString('local_save_path');
-    if (saved != null && saved.isNotEmpty) return saved;
-    final dir = await getExternalStorageDirectory() ??
-        await getApplicationDocumentsDirectory();
-    return dir.path;
+    return prefs.getString('local_save_path')!;
   }
 
   Future<void> _loadDir(String path) async {

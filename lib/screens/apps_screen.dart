@@ -2,7 +2,6 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
 import '../services/adb_service.dart';
@@ -946,9 +945,7 @@ class AppsScreenState extends State<AppsScreen>
 
   Future<void> _downloadApk(AppInfoEx app) async {
     final prefs = await SharedPreferences.getInstance();
-    final saveDir = prefs.getString('local_save_path') ??
-        (await getExternalStorageDirectory() ??
-         await getApplicationDocumentsDirectory()).path;
+    final saveDir = prefs.getString('local_save_path')!;
     await Directory(saveDir).create(recursive: true);
     final savePath = '$saveDir/${app.packageName}.apk';
 
