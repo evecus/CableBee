@@ -12,8 +12,8 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  String _downloadPath = '/sdcard/download/cablebee';
-  String _localSavePath = '';
+  String _downloadPath = '/sdcard/autosave';
+  String _localSavePath = '/sdcard/download/cablebee';
 
   @override
   void initState() {
