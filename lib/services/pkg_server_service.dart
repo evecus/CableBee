@@ -100,8 +100,8 @@ class PkgServerService {
   Future<PkgInfo?> getPackage(String packageName) async {
     await _ensureDeployed();
     final res = await _adb.shell(
-        'app_process -Djava.class.path=$_remoteDex '
-        '$_remoteDir com.cablebee.pkgserver.Main '
+        'CLASSPATH=$_remoteDex app_process /system/bin '
+        'com.cablebee.pkgserver.Main '
         '"$packageName" 2>/dev/null');
     for (final line in res.stdout.split('\n')) {
       final t = line.trim();
@@ -124,9 +124,7 @@ class PkgServerService {
     // -Djava.class.path tells it where to find our dex.
     // stdout is line-buffered JSON; stderr has progress messages.
     final res = await _adb.shell(
-        'app_process '
-        '-Djava.class.path=$_remoteDex '
-        '$_remoteDir '
+        'CLASSPATH=$_remoteDex app_process /system/bin '
         'com.cablebee.pkgserver.Main '
         '2>/dev/null',
         timeoutMs: 120000); // 2 min for large package lists
