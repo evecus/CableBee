@@ -12,8 +12,8 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  String _downloadPath = '/sdcard/autosave';
-  String _localSavePath = '/sdcard/download/cablebee';
+  static const _defaultLocalSavePath = '/sdcard/download/cablebee';
+  String _localSavePath = _defaultLocalSavePath;
 
   @override
   void initState() {
@@ -24,16 +24,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _loadPrefs() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
-      _downloadPath =
-          prefs.getString('download_path') ?? '/sdcard/download/cablebee';
-      _localSavePath = prefs.getString('local_save_path') ?? '';
+      _localSavePath =
+          prefs.getString('local_save_path') ?? _defaultLocalSavePath;
     });
-  }
-
-  Future<void> _setDownloadPath(String path) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('download_path', path);
-    setState(() => _downloadPath = path);
   }
 
   Future<void> _setLocalSavePath(String path) async {
@@ -42,13 +35,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _localSavePath = path);
   }
 
+  /// 校验路径：必须以 / 开头且不含非法字符，否则回退到默认值
+  bool _isValidPath(String path) {
+    if (path.isEmpty) return false;
+    if (!path.startsWith('/')) return false;
+    // 不允许 . 或空格开头的路径段，也不允许连续 //
+    if (path.contains('//')) return false;
+    return true;
+  }
+
   void _editLocalSavePath() {
     final ctrl = TextEditingController(text: _localSavePath);
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: AppTheme.bg1,
-        title: const Text('本机保存路径',
+        title: const Text('本机默认保存路径',
             style: TextStyle(
               color: AppTheme.textPrimary,
               fontFamily: 'SpaceMono',
@@ -61,11 +63,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
             fontSize: 12,
             color: AppTheme.textPrimary,
           ),
-          decoration: const InputDecoration(
+          decoration: InputDecoration(
             labelText: '本机绝对路径',
-            labelStyle: TextStyle(color: AppTheme.textMuted, fontSize: 12),
-            hintText: '/storage/emulated/0/Download/CableBee',
-            hintStyle: TextStyle(color: AppTheme.textMuted, fontSize: 12),
+            labelStyle: const TextStyle(color: AppTheme.textMuted, fontSize: 12),
+            hintText: _defaultLocalSavePath,
+            hintStyle: const TextStyle(color: AppTheme.textMuted, fontSize: 12),
           ),
         ),
         actions: [
@@ -78,55 +80,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
             style: FilledButton.styleFrom(backgroundColor: AppTheme.primary),
             onPressed: () {
               final v = ctrl.text.trim();
-              if (v.isNotEmpty) _setLocalSavePath(v);
+              final effective = _isValidPath(v) ? v : _defaultLocalSavePath;
+              _setLocalSavePath(effective);
               Navigator.pop(context);
-            },
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _editDownloadPath() {
-    final ctrl = TextEditingController(text: _downloadPath);
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: AppTheme.bg1,
-        title: const Text('下载保存路径',
-            style: TextStyle(
-              color: AppTheme.textPrimary,
-              fontFamily: 'SpaceMono',
-              fontSize: 14,
-            )),
-        content: TextField(
-          controller: ctrl,
-          style: const TextStyle(
-            fontFamily: 'JetBrainsMono',
-            fontSize: 12,
-            color: AppTheme.textPrimary,
-          ),
-          decoration: const InputDecoration(
-            labelText: '设备路径',
-            labelStyle: TextStyle(color: AppTheme.textMuted, fontSize: 12),
-            hintText: '/sdcard/download/cablebee',
-            hintStyle: TextStyle(color: AppTheme.textMuted, fontSize: 12),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消',
-                style: TextStyle(color: AppTheme.textMuted)),
-          ),
-          FilledButton(
-            style:
-                FilledButton.styleFrom(backgroundColor: AppTheme.primary),
-            onPressed: () {
-              final v = ctrl.text.trim();
-              if (v.isNotEmpty) _setDownloadPath(v);
-              Navigator.pop(context);
+              if (!_isValidPath(v)) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('路径无效，已恢复为默认路径'),
+                    backgroundColor: AppTheme.warning,
+                  ),
+                );
+              }
             },
             child: const Text('保存'),
           ),
@@ -286,51 +250,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     Container(
                       width: 36, height: 36,
                       decoration: BoxDecoration(
-                        color: AppTheme.primary.withOpacity(0.1),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: const Icon(Icons.download_rounded, size: 18, color: AppTheme.primary),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('下载保存路径', style: TextStyle(
-                          fontFamily: 'SpaceMono', fontSize: 13,
-                          fontWeight: FontWeight.w600, color: AppTheme.textPrimary,
-                        )),
-                        Text(_downloadPath, style: const TextStyle(
-                          fontFamily: 'JetBrainsMono', fontSize: 11,
-                          color: AppTheme.textMuted,
-                        ), overflow: TextOverflow.ellipsis),
-                      ],
-                    )),
-                    IconButton(
-                      icon: const Icon(Icons.edit_rounded, size: 16, color: AppTheme.primary),
-                      onPressed: _editDownloadPath,
-                      tooltip: '修改路径',
-                    ),
-                  ]),
-                ),
-                const Divider(height: 1),
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(16, 10, 16, 10),
-                  child: Row(children: [
-                    Icon(Icons.info_outline_rounded, size: 14, color: AppTheme.textMuted),
-                    SizedBox(width: 8),
-                    Expanded(child: Text(
-                      '下载的文件会保存到以上路径，首次下载时自动创建目录。',
-                      style: TextStyle(fontFamily: 'JetBrainsMono', fontSize: 10, color: AppTheme.textMuted),
-                    )),
-                  ]),
-                ),
-                const Divider(height: 1),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-                  child: Row(children: [
-                    Container(
-                      width: 36, height: 36,
-                      decoration: BoxDecoration(
                         color: AppTheme.success.withOpacity(0.1),
                         borderRadius: BorderRadius.circular(8),
                       ),
@@ -340,19 +259,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     Expanded(child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text('本机保存路径', style: TextStyle(
+                        const Text('本机默认保存路径', style: TextStyle(
                           fontFamily: 'SpaceMono', fontSize: 13,
                           fontWeight: FontWeight.w600, color: AppTheme.textPrimary,
                         )),
                         Text(
-                          _localSavePath.isNotEmpty
-                              ? _localSavePath
-                              : '未设置（使用系统默认路径）',
-                          style: TextStyle(
+                          _localSavePath,
+                          style: const TextStyle(
                             fontFamily: 'JetBrainsMono', fontSize: 11,
-                            color: _localSavePath.isNotEmpty
-                                ? AppTheme.textMuted
-                                : AppTheme.textMuted.withOpacity(0.5),
+                            color: AppTheme.textMuted,
                           ),
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -372,7 +287,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     Icon(Icons.info_outline_rounded, size: 14, color: AppTheme.textMuted),
                     SizedBox(width: 8),
                     Expanded(child: Text(
-                      '截图、文件下载、APK 提取均保存到此路径。未设置时使用系统默认下载目录。',
+                      '截图、文件下载、APK 提取均保存到此路径。路径无效时自动恢复默认值。',
                       style: TextStyle(fontFamily: 'JetBrainsMono', fontSize: 10, color: AppTheme.textMuted),
                     )),
                   ]),
