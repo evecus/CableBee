@@ -1,0 +1,103 @@
+name: Build pkgserver.dex
+
+on:
+  push:
+    paths:
+      - 'src/**/*.java'                        # 修复①：路径改为实际的 src/
+      - '.github/workflows/main.yml'           # 修复②：文件名对应 main.yml
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Compile Java → DEX
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Java 17 供 sdkmanager 使用，编译时仍用 -source 8 -target 8 ──────
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'                   # 修复③：sdkmanager 16.0 需要 JDK 17+
+
+      # ── Android SDK build-tools for d8 ───────────────────────────────────
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 12266719
+          accept-android-sdk-licenses: true
+          packages: tools platform-tools
+
+      - name: Install build-tools 33.0.0
+        run: |
+          sdkmanager "build-tools;33.0.0" "platforms;android-33"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+
+      # ── Compile ───────────────────────────────────────────────────────────
+      - name: Compile Java sources
+        run: |
+          SRC=src                              # 修复④：路径改为实际的 src/
+          OUT=out
+          CLASS_DIR=$OUT/classes
+          ANDROID_JAR=$ANDROID_HOME/platforms/android-33/android.jar
+          D8=$ANDROID_HOME/build-tools/33.0.0/d8
+
+          mkdir -p $CLASS_DIR
+
+          echo "=== javac ==="
+          find $SRC -name "*.java" | sort
+          javac \
+            -source 8 -target 8 \
+            -bootclasspath $ANDROID_JAR \
+            -classpath $ANDROID_JAR \
+            -d $CLASS_DIR \
+            $(find $SRC -name "*.java")
+
+          echo "=== d8 ==="
+          $D8 \
+            --release \
+            --min-api 21 \
+            --output $OUT \
+            $(find $CLASS_DIR -name "*.class")
+
+          echo "=== result ==="
+          ls -lh $OUT/classes.dex
+          echo "SIZE=$(wc -c < $OUT/classes.dex)" >> $GITHUB_ENV
+
+      # ── Copy dex to Flutter assets ────────────────────────────────────────
+      - name: Copy to assets/pkgserver.dex
+        run: |
+          mkdir -p assets
+          cp out/classes.dex assets/pkgserver.dex  # 修复⑤：路径同步修改
+          echo "Copied pkgserver.dex (${{ env.SIZE }} bytes) to assets/"
+
+      # ── Commit back to repo ───────────────────────────────────────────────
+      - name: Commit pkgserver.dex
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add assets/pkgserver.dex
+
+          if git diff --cached --quiet; then
+            echo "pkgserver.dex unchanged, nothing to commit."
+          else
+            git commit -m "chore: update pkgserver.dex (${{ env.SIZE }} bytes) [skip ci]"
+            git push
+            echo "Committed and pushed assets/pkgserver.dex"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Also upload as artifact for manual inspection ─────────────────────
+      - name: Upload dex artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pkgserver-dex
+          path: assets/pkgserver.dex
+          retention-days: 30
