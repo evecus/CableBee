@@ -124,7 +124,7 @@ class RemoteScreenState extends State<RemoteScreen>
       final textureId = await _kMethod.invokeMethod<int>('start', {
         'serial':  serial,
         'maxSize': _maxSize,
-        'bitRate': _bitRate * 1_000_000,
+        'bitRate': _bitRate * 1000000,
         'maxFps':  _maxFps,
       });
 
