@@ -209,7 +209,7 @@ class AdbService extends ChangeNotifier {
   // ── 文件列表 ──────────────────────────────────────────────────────────────
 
   Future<List<FileEntry>> listFiles(String path) async {
-    final result = await shell('ls -la "$path" 2>&1');
+    final result = await shell('ls -laL "$path" 2>&1');
     return result.stdout
         .split('\n')
         .map(FileEntry.parseLsLine)
