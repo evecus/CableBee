@@ -1,8 +1,8 @@
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:provider/provider.dart';
 import '../services/adb_service.dart';
+import '../services/pkg_server_service.dart';
 import '../utils/theme.dart';
 import '../widgets/common.dart';
 
@@ -12,27 +12,24 @@ enum SortMode { packageName, appName }
 
 // ── 扩展 AppInfo，包含应用名称和图标 ─────────────────────────────────────────
 
+/// Wraps PkgInfo (from PkgServerService) with mutable UI state.
 class AppInfoEx {
-  final AppInfo base;
-  String? appLabel;        // 应用名称（可能为 null，未加载时）
-  Uint8List? iconBytes;    // 图标字节（可能为 null）
-  bool isSystem;
-  bool isDisabled;         // 停用状态
-  bool isFrozen;           // 冻结状态（pm disable）
+  final PkgInfo pkg;
+  Uint8List? iconBytes;    // 图标字节（来自 PkgInfo.icon，或后续加载）
+  bool isDisabled;
+  bool isFrozen;
 
   AppInfoEx({
-    required this.base,
-    this.appLabel,
-    this.iconBytes,
-    this.isSystem = false,
+    required this.pkg,
     this.isDisabled = false,
     this.isFrozen = false,
-  });
+  }) : iconBytes = pkg.icon;
 
-  String get packageName => base.packageName;
-  String get apkPath => base.apkPath;
-  String get displayName => (appLabel != null && appLabel!.isNotEmpty) ? appLabel! : _shortName;
-  String get _shortName => packageName.split('.').last;
+  String get packageName => pkg.packageName;
+  String get apkPath     => pkg.apkPath;
+  bool   get isSystem    => pkg.isSystem;
+  String get displayName => pkg.label.isNotEmpty ? pkg.label : packageName.split('.').last;
+  String? get appLabel   => pkg.label.isNotEmpty ? pkg.label : null;
 }
 
 // ── AppsScreen ────────────────────────────────────────────────────────────────
@@ -94,90 +91,39 @@ class AppsScreenState extends State<AppsScreen>
     super.dispose();
   }
 
-  // ── 加载应用列表 ────────────────────────────────────────────────────────────
+  // ── 加载应用列表（通过 PkgServerService）──────────────────────────────────
+
+  PkgServerService? _pkgServer;
 
   Future<void> _loadApps() async {
     final adb = context.read<AdbService>();
+    _pkgServer ??= PkgServerService(adb);
+
     setState(() {
       _loading = true;
+      _apps = [];
       _actionResult = null;
     });
 
-    // 加载所有包（系统+第三方），通过本地过滤
-    final rawApps = await adb.listPackages(includeSystem: true);
-
-    // 解析系统 vs 第三方
-    final systemPkgs = await _getSystemPackages(adb);
-
-    // 加载停用/冻结状态
-    final disabledPkgs = await _getDisabledPackages(adb);
-
-    // 转换
-    final exApps = rawApps.map((a) {
-      final isSys = systemPkgs.contains(a.packageName);
-      final isDisabled = disabledPkgs.contains(a.packageName);
-      return AppInfoEx(
-        base: a,
-        isSystem: isSys,
-        isDisabled: isDisabled,
-        isFrozen: isDisabled,
-      );
-    }).toList();
-
-    // 加载应用名称
-    final pkgs = exApps.map((a) => a.packageName).toList();
-    final labelMap = await adb.getAppLabels(pkgs);
-    for (final app in exApps) {
-      app.appLabel = labelMap[app.packageName];
-    }
-
-    setState(() {
-      _apps = exApps;
-      _loading = false;
-    });
-    _applyFilter();
-
-    // 后台懒加载图标，每批 8 个
-    _loadIconsLazily(adb, List.from(exApps));
-  }
-
-  Future<void> _loadIconsLazily(AdbService adb, List<AppInfoEx> apps) async {
-    const batchSize = 8;
-    for (var i = 0; i < apps.length; i += batchSize) {
+    // 流式接收，每收到一个 package 立即追加到列表并刷新 UI
+    await for (final pkgInfo in _pkgServer!.streamPackages()) {
       if (!mounted) return;
-      final batch = apps.skip(i).take(batchSize).toList();
-      await Future.wait(batch.map((app) async {
-        if (app.iconBytes != null) return;
-        try {
-          final bytes = await adb.getAppIcon(app.apkPath);
-          if (bytes != null && bytes.isNotEmpty && mounted) {
-            setState(() => app.iconBytes = Uint8List.fromList(bytes));
-          }
-        } catch (_) {}
-      }));
-      await Future.delayed(const Duration(milliseconds: 80));
+      final ex = AppInfoEx(
+        pkg: pkgInfo,
+        isDisabled: !pkgInfo.enabled,
+        isFrozen:   !pkgInfo.enabled,
+      );
+      setState(() {
+        _apps.add(ex);
+      });
+      _applyFilter();
+    }
+
+    if (mounted) {
+      setState(() => _loading = false);
+      _applyFilter();
     }
   }
-
-  Future<Set<String>> _getSystemPackages(AdbService adb) async {
-    final res = await adb.shell('pm list packages -s 2>&1');
-    return res.stdout
-        .split('\n')
-        .where((l) => l.startsWith('package:'))
-        .map((l) => l.substring(8).trim())
-        .toSet();
-  }
-
-  Future<Set<String>> _getDisabledPackages(AdbService adb) async {
-    final res = await adb.shell('pm list packages -d 2>&1');
-    return res.stdout
-        .split('\n')
-        .where((l) => l.startsWith('package:'))
-        .map((l) => l.substring(8).trim())
-        .toSet();
-  }
-
-  // _loadAppLabels → 已移至 AdbService.getAppLabels()
 
   // ── 过滤与排序 ──────────────────────────────────────────────────────────────
 
