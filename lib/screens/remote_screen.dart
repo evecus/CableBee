@@ -1,25 +1,39 @@
 // lib/screens/remote_screen.dart
-// 远程控制页面
-// 原理：每隔 N ms 截图（screencap -> pull）-> 展示在 Image widget 上
-//      用户点触 / 滑动 -> 换算为设备坐标 -> adb shell input tap/swipe
-// 注意：截图轮询有延迟，不是真正 mirroring，但无需额外原生支持。
+// scrcpy 投屏 — 通过 MediaCodec 硬解 H.264，渲染到 Flutter Texture
+// 控制通过 scrcpy 控制协议发送，不再用 adb shell input
 
 import 'dart:async';
-import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../services/adb_service.dart';
 import '../utils/theme.dart';
 import '../widgets/common.dart';
 
-// ─────────────────────────────────────────────────────────────
+// ── scrcpy MethodChannel / EventChannel ────────────────────────────────────
+
+const _kMethod = MethodChannel('com.cablebee.assistant/scrcpy');
+const _kEvents = EventChannel('com.cablebee.assistant/scrcpy_events');
+
+// ── Android keycode 常量 ────────────────────────────────────────────────────
+const _kKeyBack   = 4;
+const _kKeyHome   = 3;
+const _kKeySwitch = 187;
+const _kKeyMenu   = 82;
+
+// ── 触摸 action 常量（MotionEvent） ─────────────────────────────────────────
+const _kActionDown  = 0;
+const _kActionUp    = 1;
+const _kActionMove  = 2;
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 class RemoteScreen extends StatefulWidget {
   final void Function(List<Widget> actions)? onActionsChanged;
   const RemoteScreen({super.key, this.onActionsChanged});
+
   @override
   State<RemoteScreen> createState() => RemoteScreenState();
 }
@@ -31,37 +45,25 @@ class RemoteScreenState extends State<RemoteScreen>
 
   void refreshActions() => _pushActions();
 
-  // ── 状态 ──
+  // ── 状态 ──────────────────────────────────────────────────────────────────
   bool _connected   = false;
   bool _connecting  = false;
-  bool _capturing   = false;
 
-  // 分辨率（从 wm size 获取）
-  int _devW = 0, _devH = 0;
-
-  // 当前帧
-  File?  _frameFile;
-  Uint8List? _frameBytes;
-
-  Timer? _captureTimer;
-  int    _intervalMs = 500;   // 刷新间隔，可调
-  bool   _frameLoading = false;
-
-  // 触摸状态（用于 swipe）
-  Offset? _touchStart;
-  Offset? _touchEnd;
-  int?    _touchStartMs;
+  int? _textureId;          // Flutter Texture id（由 Kotlin 返回）
+  int  _devW = 1080;
+  int  _devH = 1920;
 
   String? _statusMsg;
+  StreamSubscription? _eventSub;
 
-  // 设置项
-  String _resolutionMode = '原始分辨率';  // 原始分辨率 / 720p / 480p
-  int    _bitrateMode    = 8;            // Mbps（仅展示用）
-  bool   _fullScreen     = false;
-  bool   _landscape      = false;        // 强制横屏显示
+  // 配置
+  int  _maxSize  = 1080;   // 最大边长
+  int  _bitRate  = 8;      // Mbps
+  int  _maxFps   = 30;
+  bool _fullScreen = false;
 
-  // 临时截图文件路径
-  String? _localFramePath;
+  // 触摸跟踪（用于多点）
+  final Map<int, Offset> _pointers = {};
 
   @override
   void initState() {
@@ -73,30 +75,34 @@ class RemoteScreenState extends State<RemoteScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _stopCapture();
+    _stopSession();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused) _stopCapture();
-    if (state == AppLifecycleState.resumed && _connected) _startCapture();
+    if (state == AppLifecycleState.paused)  _stopSession();
+    if (state == AppLifecycleState.resumed && _connected) _connect();
   }
 
   void _pushActions() {
     widget.onActionsChanged?.call([
       if (_connected)
         PopupMenuButton<String>(
-          icon: const Icon(Icons.more_vert_rounded, size: 20, color: AppTheme.textMuted),
+          icon: const Icon(Icons.more_vert_rounded,
+              size: 20, color: AppTheme.textMuted),
           color: AppTheme.bg1,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
           onSelected: (v) {
-            if (v == 'disconnect') _disconnect();
+            if (v == 'disconnect') _stopSession();
             if (v == 'quality')   _showQualityDialog();
           },
           itemBuilder: (_) => const [
-            PopupMenuItem(value: 'quality',    child: _MenuRow(icon: Icons.tune_rounded,         label: '质量设置')),
-            PopupMenuItem(value: 'disconnect', child: _MenuRow(icon: Icons.link_off_rounded,      label: '断开投屏',  color: AppTheme.danger)),
+            PopupMenuItem(value: 'quality',
+                child: _MenuRow(icon: Icons.tune_rounded, label: '质量设置')),
+            PopupMenuItem(value: 'disconnect',
+                child: _MenuRow(icon: Icons.link_off_rounded,
+                    label: '断开投屏', color: AppTheme.danger)),
           ],
         ),
     ]);
@@ -105,243 +111,148 @@ class RemoteScreenState extends State<RemoteScreen>
   // ── 连接 ──────────────────────────────────────────────────────────────────
 
   Future<void> _connect() async {
-    setState(() { _connecting = true; _statusMsg = null; });
+    setState(() { _connecting = true; _statusMsg = '正在初始化...'; });
+
     final adb = context.read<AdbService>();
+    final serial = adb.selectedDevice?.serial ?? '';
 
-    // 获取设备分辨率
-    final sizeRes = await adb.shell('wm size');
-    final m = RegExp(r'(\d+)x(\d+)').firstMatch(sizeRes.stdout);
-    if (m != null) {
-      _devW = int.parse(m.group(1)!);
-      _devH = int.parse(m.group(2)!);
-    } else {
-      _devW = 1080; _devH = 1920; // fallback
-    }
+    // 订阅事件流
+    _eventSub?.cancel();
+    _eventSub = _kEvents.receiveBroadcastStream().listen(_onEvent);
 
-    // 准备本机缓存路径
-    final dir  = await getTemporaryDirectory();
-    _localFramePath = '${dir.path}/cbee_frame.png';
-
-    setState(() { _connected = true; _connecting = false; });
-    _pushActions();
-    _startCapture();
-  }
-
-  void _disconnect() {
-    _stopCapture();
-    setState(() {
-      _connected   = false;
-      _frameBytes  = null;
-      _frameFile   = null;
-      _statusMsg   = null;
-    });
-    _pushActions();
-  }
-
-  // ── 截图轮询 ──────────────────────────────────────────────────────────────
-
-  void _startCapture() {
-    _captureTimer?.cancel();
-    _captureTimer = Timer.periodic(Duration(milliseconds: _intervalMs), (_) {
-      if (!_frameLoading) _captureFrame();
-    });
-  }
-
-  void _stopCapture() {
-    _captureTimer?.cancel();
-    _captureTimer = null;
-    _capturing = false;
-  }
-
-  Future<void> _captureFrame() async {
-    if (!mounted || !_connected) return;
-    _frameLoading = true;
     try {
-      final adb  = context.read<AdbService>();
-      final path = _localFramePath!;
+      final textureId = await _kMethod.invokeMethod<int>('start', {
+        'serial':  serial,
+        'maxSize': _maxSize,
+        'bitRate': _bitRate * 1_000_000,
+        'maxFps':  _maxFps,
+      });
 
-      // 决定截图缩放命令
-      String scaleCmd = '';
-      if (_resolutionMode == '720p')  scaleCmd = 'screencap -p /sdcard/cbee_sc.png && convert /sdcard/cbee_sc.png -resize 720x /sdcard/cbee_sc.png';
-      if (_resolutionMode == '480p')  scaleCmd = 'screencap -p /sdcard/cbee_sc.png && convert /sdcard/cbee_sc.png -resize 480x /sdcard/cbee_sc.png';
-
-      if (scaleCmd.isNotEmpty) {
-        await adb.shell(scaleCmd);
-      } else {
-        await adb.shell('screencap -p /sdcard/cbee_sc.png');
-      }
-
-      final res = await adb.pull('/sdcard/cbee_sc.png', path);
-      if (res.isSuccess) {
-        final bytes = await File(path).readAsBytes();
-        if (mounted && bytes.isNotEmpty) {
-          setState(() {
-            _frameBytes = bytes;
-            _capturing  = true;
-          });
-        }
-      }
-    } catch (_) {}
-    _frameLoading = false;
+      setState(() {
+        _textureId  = textureId;
+        _connecting = false;
+        _connected  = true;
+        _statusMsg  = null;
+      });
+      _pushActions();
+    } on PlatformException catch (e) {
+      setState(() {
+        _connecting = false;
+        _statusMsg  = '✗ 连接失败：${e.message}';
+      });
+    }
   }
 
-  // ── 输入 ──────────────────────────────────────────────────────────────────
+  void _onEvent(dynamic raw) {
+    if (!mounted) return;
+    final map  = Map<String, dynamic>.from(raw as Map);
+    final type = map['type'] as String? ?? '';
 
-  // 将屏幕点击坐标换算成设备坐标
-  Offset _toDevCoord(Offset local, Size renderSize) {
+    switch (type) {
+      case 'status':
+        setState(() => _statusMsg = map['msg'] as String?);
+        break;
+      case 'connected':
+        setState(() {
+          _devW      = (map['deviceWidth']  as int?) ?? _devW;
+          _devH      = (map['deviceHeight'] as int?) ?? _devH;
+          _statusMsg = null;
+        });
+        break;
+      case 'error':
+        setState(() {
+          _statusMsg  = '✗ ${map['message']}';
+          _connected  = false;
+          _connecting = false;
+          _textureId  = null;
+        });
+        _pushActions();
+        break;
+      case 'stopped':
+        if (mounted) {
+          setState(() {
+            _connected  = false;
+            _connecting = false;
+            _textureId  = null;
+            _statusMsg  = null;
+          });
+          _pushActions();
+        }
+        break;
+    }
+  }
+
+  Future<void> _stopSession() async {
+    _eventSub?.cancel();
+    _eventSub = null;
+    try { await _kMethod.invokeMethod('stop'); } catch (_) {}
+    if (mounted) {
+      setState(() {
+        _connected  = false;
+        _connecting = false;
+        _textureId  = null;
+        _statusMsg  = null;
+      });
+      _pushActions();
+    }
+  }
+
+  // ── 控制事件 ──────────────────────────────────────────────────────────────
+
+  void _onPointerDown(PointerDownEvent e, Size renderSize) {
+    _pointers[e.pointer] = e.localPosition;
+    final dev = _toDev(e.localPosition, renderSize);
+    _kMethod.invokeMethod('touch', {
+      'action':    _kActionDown,
+      'pointerId': e.pointer,
+      'x': dev.dx.round(), 'y': dev.dy.round(),
+      'w': _devW, 'h': _devH,
+      'pressure': e.pressure,
+    });
+  }
+
+  void _onPointerMove(PointerMoveEvent e, Size renderSize) {
+    _pointers[e.pointer] = e.localPosition;
+    final dev = _toDev(e.localPosition, renderSize);
+    _kMethod.invokeMethod('touch', {
+      'action':    _kActionMove,
+      'pointerId': e.pointer,
+      'x': dev.dx.round(), 'y': dev.dy.round(),
+      'w': _devW, 'h': _devH,
+      'pressure': e.pressure,
+    });
+  }
+
+  void _onPointerUp(PointerUpEvent e, Size renderSize) {
+    _pointers.remove(e.pointer);
+    final dev = _toDev(e.localPosition, renderSize);
+    _kMethod.invokeMethod('touch', {
+      'action':    _kActionUp,
+      'pointerId': e.pointer,
+      'x': dev.dx.round(), 'y': dev.dy.round(),
+      'w': _devW, 'h': _devH,
+      'pressure': 0.0,
+    });
+  }
+
+  void _sendKeycode(int keycode) {
+    _kMethod.invokeMethod('keycode', {'action': 0, 'keycode': keycode});
+    Future.delayed(const Duration(milliseconds: 50), () {
+      _kMethod.invokeMethod('keycode', {'action': 1, 'keycode': keycode});
+    });
+  }
+
+  // 将渲染坐标换算为设备坐标
+  Offset _toDev(Offset local, Size renderSize) {
+    // 设备横屏但渲染区域竖屏时旋转
+    if (_devW > _devH && renderSize.width < renderSize.height) {
+      final scaleX = _devH / renderSize.width;
+      final scaleY = _devW / renderSize.height;
+      return Offset(local.dy * scaleY, (_devH - local.dx * scaleX));
+    }
     final scaleX = _devW / renderSize.width;
     final scaleY = _devH / renderSize.height;
-
-    // 如果设备横屏且 app 竖屏投屏，需要旋转坐标
-    if (_devW > _devH && renderSize.width < renderSize.height) {
-      // 设备横屏，app 竖屏显示 → 旋转 90°
-      final rx = local.dy * scaleY;
-      final ry = (renderSize.width - local.dx) * scaleX;
-      return Offset(rx, ry);
-    }
     return Offset(local.dx * scaleX, local.dy * scaleY);
-  }
-
-  Future<void> _sendTap(Offset devCoord) async {
-    final adb = context.read<AdbService>();
-    await adb.shell(
-        'input tap ${devCoord.dx.round()} ${devCoord.dy.round()}');
-  }
-
-  Future<void> _sendSwipe(Offset start, Offset end, int durationMs) async {
-    final adb = context.read<AdbService>();
-    await adb.shell(
-        'input swipe '
-        '${start.dx.round()} ${start.dy.round()} '
-        '${end.dx.round()} ${end.dy.round()} '
-        '$durationMs');
-  }
-
-  Future<void> _sendKeyEvent(int keyCode) async {
-    final adb = context.read<AdbService>();
-    await adb.shell('input keyevent $keyCode');
-  }
-
-  // ── 设置弹窗 ──────────────────────────────────────────────────────────────
-
-  void _showConnectDialog() {
-    showDialog(
-      context: context,
-      builder: (_) => StatefulBuilder(builder: (ctx, setS) => AlertDialog(
-        backgroundColor: AppTheme.bg1,
-        title: const Text('投屏设置', style: TextStyle(
-          color: AppTheme.textPrimary, fontFamily: 'SpaceMono', fontSize: 15)),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          // 分辨率
-          _SettingRow(
-            label: '分辨率',
-            child: DropdownButton<String>(
-              value: _resolutionMode,
-              dropdownColor: AppTheme.bg1,
-              style: const TextStyle(color: AppTheme.textPrimary,
-                fontFamily: 'JetBrainsMono', fontSize: 12),
-              underline: const SizedBox(),
-              items: ['原始分辨率', '720p', '480p'].map((v) =>
-                DropdownMenuItem(value: v, child: Text(v))).toList(),
-              onChanged: (v) => setS(() => _resolutionMode = v!),
-            ),
-          ),
-          // 刷新间隔
-          _SettingRow(
-            label: '刷新间隔',
-            child: DropdownButton<int>(
-              value: _intervalMs,
-              dropdownColor: AppTheme.bg1,
-              style: const TextStyle(color: AppTheme.textPrimary,
-                fontFamily: 'JetBrainsMono', fontSize: 12),
-              underline: const SizedBox(),
-              items: const [
-                DropdownMenuItem(value: 300,  child: Text('300ms (快)')),
-                DropdownMenuItem(value: 500,  child: Text('500ms')),
-                DropdownMenuItem(value: 1000, child: Text('1000ms (省电)')),
-              ],
-              onChanged: (v) => setS(() => _intervalMs = v!),
-            ),
-          ),
-          // 全屏
-          _SettingRow(
-            label: '全屏显示',
-            child: Switch(
-              value: _fullScreen,
-              activeColor: AppTheme.primary,
-              onChanged: (v) => setS(() => _fullScreen = v),
-            ),
-          ),
-        ]),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context),
-            child: const Text('取消', style: TextStyle(color: AppTheme.textMuted))),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: AppTheme.primary),
-            onPressed: () { Navigator.pop(context); _connect(); },
-            child: const Text('连接'),
-          ),
-        ],
-      )),
-    );
-  }
-
-  void _showQualityDialog() {
-    showDialog(
-      context: context,
-      builder: (_) => StatefulBuilder(builder: (ctx, setS) => AlertDialog(
-        backgroundColor: AppTheme.bg1,
-        title: const Text('质量设置', style: TextStyle(
-          color: AppTheme.textPrimary, fontFamily: 'SpaceMono', fontSize: 15)),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          _SettingRow(
-            label: '分辨率',
-            child: DropdownButton<String>(
-              value: _resolutionMode,
-              dropdownColor: AppTheme.bg1,
-              style: const TextStyle(color: AppTheme.textPrimary,
-                fontFamily: 'JetBrainsMono', fontSize: 12),
-              underline: const SizedBox(),
-              items: ['原始分辨率', '720p', '480p'].map((v) =>
-                DropdownMenuItem(value: v, child: Text(v))).toList(),
-              onChanged: (v) {
-                setS(() => _resolutionMode = v!);
-                setState(() => _resolutionMode = v!);
-              },
-            ),
-          ),
-          _SettingRow(
-            label: '刷新间隔',
-            child: DropdownButton<int>(
-              value: _intervalMs,
-              dropdownColor: AppTheme.bg1,
-              style: const TextStyle(color: AppTheme.textPrimary,
-                fontFamily: 'JetBrainsMono', fontSize: 12),
-              underline: const SizedBox(),
-              items: const [
-                DropdownMenuItem(value: 300,  child: Text('300ms (快)')),
-                DropdownMenuItem(value: 500,  child: Text('500ms')),
-                DropdownMenuItem(value: 1000, child: Text('1000ms (省电)')),
-              ],
-              onChanged: (v) {
-                setS(() => _intervalMs = v!);
-                setState(() => _intervalMs = v!);
-                // 重启定时器
-                _stopCapture();
-                _startCapture();
-              },
-            ),
-          ),
-        ]),
-        actions: [
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: AppTheme.primary),
-            onPressed: () => Navigator.pop(context),
-            child: const Text('确定'),
-          ),
-        ],
-      )),
-    );
   }
 
   // ── Build ──────────────────────────────────────────────────────────────────
@@ -349,17 +260,11 @@ class RemoteScreenState extends State<RemoteScreen>
   @override
   Widget build(BuildContext context) {
     super.build(context);
-
-    // 未连接：展示配置页
-    if (!_connected) {
-      return _buildConfigPage();
-    }
-
-    // 已连接：投屏视图
-    return _buildMirrorPage();
+    return _connected ? _buildMirrorPage() : _buildConfigPage();
   }
 
-  // ── 配置页（未连接时）──────────────────────────────────────────────────────
+  // ── 配置页 ────────────────────────────────────────────────────────────────
+
   Widget _buildConfigPage() {
     return Scaffold(
       backgroundColor: AppTheme.bg0,
@@ -368,7 +273,6 @@ class RemoteScreenState extends State<RemoteScreen>
         child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           const SizedBox(height: 12),
 
-          // 标题卡片
           TintedCard(
             padding: const EdgeInsets.all(20),
             child: Column(children: [
@@ -379,15 +283,16 @@ class RemoteScreenState extends State<RemoteScreen>
                   borderRadius: BorderRadius.circular(14),
                   border: Border.all(color: AppTheme.primary.withOpacity(0.3)),
                 ),
-                child: const Icon(Icons.cast_rounded, size: 28, color: AppTheme.primary),
+                child: const Icon(Icons.cast_rounded,
+                    size: 28, color: AppTheme.primary),
               ),
               const SizedBox(height: 12),
-              const Text('远程投屏控制', style: TextStyle(
+              const Text('实时投屏控制', style: TextStyle(
                 fontFamily: 'SpaceMono', fontSize: 16,
                 fontWeight: FontWeight.w700, color: AppTheme.textPrimary)),
               const SizedBox(height: 6),
               const Text(
-                '将被连接设备的屏幕实时投屏到此处\n支持点击和滑动操作',
+                '基于 scrcpy 协议的硬件加速投屏\n支持触摸、多点、滚动操作',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontFamily: 'JetBrainsMono', fontSize: 11,
@@ -397,61 +302,57 @@ class RemoteScreenState extends State<RemoteScreen>
 
           const SizedBox(height: 16),
 
-          // 配置卡片
           TintedCard(
             padding: EdgeInsets.zero,
             child: Column(children: [
               _ConfigTile(
-                label: '分辨率',
-                value: _resolutionMode,
+                label: '最大分辨率',
+                value: _maxSize == 0 ? '原始' : '${_maxSize}p',
                 icon: Icons.high_quality_rounded,
-                onTap: () => _showPickerDialog<String>(
-                  title: '分辨率',
-                  options: ['原始分辨率', '720p', '480p'],
-                  current: _resolutionMode,
-                  onSelect: (v) => setState(() => _resolutionMode = v),
+                onTap: () => _showPickerDialog<int>(
+                  title: '最大分辨率',
+                  options: [0, 720, 1080, 1440],
+                  labels: ['原始', '720p', '1080p', '1440p'],
+                  current: _maxSize,
+                  onSelect: (v) => setState(() => _maxSize = v),
                 ),
               ),
               const Divider(height: 1),
               _ConfigTile(
                 label: '码率',
-                value: '$_bitrateMode Mbps',
+                value: '$_bitRate Mbps',
                 icon: Icons.speed_rounded,
                 onTap: () => _showPickerDialog<int>(
                   title: '码率',
                   options: [2, 4, 8, 16],
                   labels: ['2 Mbps', '4 Mbps', '8 Mbps', '16 Mbps'],
-                  current: _bitrateMode,
-                  onSelect: (v) => setState(() => _bitrateMode = v),
+                  current: _bitRate,
+                  onSelect: (v) => setState(() => _bitRate = v),
                 ),
               ),
               const Divider(height: 1),
               _ConfigTile(
-                label: '刷新间隔',
-                value: '${_intervalMs}ms',
+                label: '最大帧率',
+                value: '$_maxFps fps',
                 icon: Icons.timer_outlined,
                 onTap: () => _showPickerDialog<int>(
-                  title: '刷新间隔',
-                  options: [300, 500, 1000],
-                  labels: ['300ms (快)', '500ms', '1000ms (省电)'],
-                  current: _intervalMs,
-                  onSelect: (v) => setState(() => _intervalMs = v),
+                  title: '最大帧率',
+                  options: [15, 30, 60],
+                  labels: ['15 fps', '30 fps', '60 fps'],
+                  current: _maxFps,
+                  onSelect: (v) => setState(() => _maxFps = v),
                 ),
-              ),
-              const Divider(height: 1),
-              _ConfigTile(
-                label: '画面比例',
-                value: '保持原始比例',
-                icon: Icons.aspect_ratio_rounded,
               ),
               const Divider(height: 1),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
                 child: Row(children: [
-                  const Icon(Icons.fullscreen_rounded, size: 18, color: AppTheme.textMuted),
+                  const Icon(Icons.fullscreen_rounded,
+                      size: 18, color: AppTheme.textMuted),
                   const SizedBox(width: 12),
                   const Expanded(child: Text('全屏显示', style: TextStyle(
-                    fontFamily: 'SpaceMono', fontSize: 13, color: AppTheme.textPrimary))),
+                    fontFamily: 'SpaceMono', fontSize: 13,
+                    color: AppTheme.textPrimary))),
                   Switch(
                     value: _fullScreen,
                     activeColor: AppTheme.primary,
@@ -464,20 +365,20 @@ class RemoteScreenState extends State<RemoteScreen>
 
           const SizedBox(height: 24),
 
-          // 连接按钮
           SizedBox(
             height: 52,
             child: FilledButton(
               style: FilledButton.styleFrom(
                 backgroundColor: AppTheme.primary,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12)),
               ),
               onPressed: _connecting ? null : _connect,
               child: _connecting
                   ? const SizedBox(
                       width: 20, height: 20,
                       child: CircularProgressIndicator(
-                        strokeWidth: 2, color: Colors.white))
+                          strokeWidth: 2, color: Colors.white))
                   : const Text('连接', style: TextStyle(
                       fontFamily: 'SpaceMono', fontSize: 15,
                       fontWeight: FontWeight.w700)),
@@ -489,7 +390,8 @@ class RemoteScreenState extends State<RemoteScreen>
             Text(_statusMsg!, textAlign: TextAlign.center,
               style: TextStyle(
                 fontFamily: 'JetBrainsMono', fontSize: 12,
-                color: _statusMsg!.startsWith('✗') ? AppTheme.danger : AppTheme.textMuted)),
+                color: _statusMsg!.startsWith('✗')
+                    ? AppTheme.danger : AppTheme.textMuted)),
           ],
           const SizedBox(height: 24),
         ]),
@@ -497,111 +399,155 @@ class RemoteScreenState extends State<RemoteScreen>
     );
   }
 
-  // ── 投屏页（已连接时）──────────────────────────────────────────────────────
+  // ── 投屏页 ────────────────────────────────────────────────────────────────
+
   Widget _buildMirrorPage() {
+    final tid = _textureId;
     final devIsLandscape = _devW > _devH;
 
-    Widget frameView = LayoutBuilder(builder: (ctx, constraints) {
-      if (_frameBytes == null) {
+    Widget mirrorView = LayoutBuilder(builder: (ctx, constraints) {
+      if (tid == null) {
         return const Center(child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             CircularProgressIndicator(color: AppTheme.primary),
             SizedBox(height: 12),
-            Text('截图中...', style: TextStyle(
+            Text('等待视频流...', style: TextStyle(
               fontFamily: 'JetBrainsMono', fontSize: 12,
               color: AppTheme.textMuted)),
           ],
         ));
       }
 
-      return GestureDetector(
-        onTapUp: (d) {
-          final box = ctx.findRenderObject() as RenderBox;
-          final size = box.size;
-          final local = d.localPosition;
-          final devCoord = _toDevCoord(local, size);
-          _sendTap(devCoord);
-        },
-        onPanStart: (d) {
-          final box = ctx.findRenderObject() as RenderBox;
-          _touchStart   = _toDevCoord(d.localPosition, box.size);
-          _touchStartMs = DateTime.now().millisecondsSinceEpoch;
-        },
-        onPanEnd: (d) {
-          // 由 onPanUpdate 记录的最终位置发送 swipe
-          if (_touchStart == null || _touchEnd == null) return;
-          final dist = (_touchEnd! - _touchStart!).distance;
-          if (dist > 20) {
-            final dur = DateTime.now().millisecondsSinceEpoch - (_touchStartMs ?? 0);
-            _sendSwipe(_touchStart!, _touchEnd!, dur.clamp(80, 2000));
-          }
-          _touchStart = null;
-          _touchEnd   = null;
-        },
-        onPanUpdate: (d) {
-          final box = ctx.findRenderObject() as RenderBox;
-          _touchEnd = _toDevCoord(d.localPosition, box.size);
-        },
-        onLongPressStart: (d) {
-          final box = ctx.findRenderObject() as RenderBox;
-          _touchStart   = _toDevCoord(d.localPosition, box.size);
-          _touchStartMs = DateTime.now().millisecondsSinceEpoch;
-        },
-        onLongPressEnd: (d) {
-          if (_touchStart == null) return;
-          final box = ctx.findRenderObject() as RenderBox;
-          final end = _toDevCoord(d.localPosition, box.size);
-          final dur = DateTime.now().millisecondsSinceEpoch - (_touchStartMs ?? 0);
-          final dist = (end - _touchStart!).distance;
-          if (dist > 30) {
-            _sendSwipe(_touchStart!, end, dur.clamp(100, 2000));
-          }
-          _touchStart = null;
-          _touchEnd   = null;
-        },
-        child: Image.memory(
-          _frameBytes!,
-          fit: BoxFit.contain,
-          gaplessPlayback: true,
+      // 计算渲染尺寸（保持设备宽高比）
+      final areaW = constraints.maxWidth;
+      final areaH = constraints.maxHeight;
+      final devAspect = _devW / _devH;
+      final areaAspect = areaW / areaH;
+
+      double renderW, renderH;
+      if (devAspect > areaAspect) {
+        renderW = areaW;
+        renderH = areaW / devAspect;
+      } else {
+        renderH = areaH;
+        renderW = areaH * devAspect;
+      }
+
+      return Center(
+        child: SizedBox(
+          width: renderW,
+          height: renderH,
+          child: Listener(
+            onPointerDown: (e) => _onPointerDown(e, Size(renderW, renderH)),
+            onPointerMove: (e) => _onPointerMove(e, Size(renderW, renderH)),
+            onPointerUp:   (e) => _onPointerUp(e,   Size(renderW, renderH)),
+            child: Texture(textureId: tid),
+          ),
         ),
       );
     });
 
-    // 如果设备横屏，把整个视图旋转 90°，让用户横持手机看
     if (devIsLandscape) {
-      frameView = RotatedBox(
-        quarterTurns: 1,
-        child: frameView,
-      );
+      mirrorView = RotatedBox(quarterTurns: 1, child: mirrorView);
     }
 
     final body = Column(children: [
       Expanded(
-        child: Container(
-          color: Colors.black,
-          child: frameView,
-        ),
+        child: Container(color: Colors.black, child: mirrorView),
       ),
-      // 导航虚拟按键栏（移到下方）
       _NavBar(
-        onBack:   () => _sendKeyEvent(4),   // KEYCODE_BACK
-        onHome:   () => _sendKeyEvent(3),   // KEYCODE_HOME
-        onRecent: () => _sendKeyEvent(187), // KEYCODE_APP_SWITCH
-        onMenu:   () => _sendKeyEvent(82),  // KEYCODE_MENU
+        onBack:   () => _sendKeycode(_kKeyBack),
+        onHome:   () => _sendKeycode(_kKeyHome),
+        onRecent: () => _sendKeycode(_kKeySwitch),
+        onMenu:   () => _sendKeycode(_kKeyMenu),
       ),
     ]);
 
-    if (_fullScreen) {
-      return Scaffold(
-        backgroundColor: Colors.black,
-        body: SafeArea(child: body),
-      );
-    }
-
     return Scaffold(
-      backgroundColor: AppTheme.bg0,
-      body: body,
+      backgroundColor: _fullScreen ? Colors.black : AppTheme.bg0,
+      body: _fullScreen ? SafeArea(child: body) : body,
+    );
+  }
+
+  // ── 弹窗 ──────────────────────────────────────────────────────────────────
+
+  void _showQualityDialog() {
+    showDialog(
+      context: context,
+      builder: (_) => StatefulBuilder(builder: (ctx, setS) => AlertDialog(
+        backgroundColor: AppTheme.bg1,
+        title: const Text('质量设置', style: TextStyle(
+          color: AppTheme.textPrimary, fontFamily: 'SpaceMono', fontSize: 15)),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          _SettingRow(
+            label: '分辨率',
+            child: DropdownButton<int>(
+              value: _maxSize,
+              dropdownColor: AppTheme.bg1,
+              style: const TextStyle(color: AppTheme.textPrimary,
+                fontFamily: 'JetBrainsMono', fontSize: 12),
+              underline: const SizedBox(),
+              items: const [
+                DropdownMenuItem(value: 0,    child: Text('原始')),
+                DropdownMenuItem(value: 720,  child: Text('720p')),
+                DropdownMenuItem(value: 1080, child: Text('1080p')),
+                DropdownMenuItem(value: 1440, child: Text('1440p')),
+              ],
+              onChanged: (v) {
+                setS(() => _maxSize = v!);
+                setState(() => _maxSize = v!);
+              },
+            ),
+          ),
+          _SettingRow(
+            label: '码率',
+            child: DropdownButton<int>(
+              value: _bitRate,
+              dropdownColor: AppTheme.bg1,
+              style: const TextStyle(color: AppTheme.textPrimary,
+                fontFamily: 'JetBrainsMono', fontSize: 12),
+              underline: const SizedBox(),
+              items: const [
+                DropdownMenuItem(value: 2,  child: Text('2 Mbps')),
+                DropdownMenuItem(value: 4,  child: Text('4 Mbps')),
+                DropdownMenuItem(value: 8,  child: Text('8 Mbps')),
+                DropdownMenuItem(value: 16, child: Text('16 Mbps')),
+              ],
+              onChanged: (v) {
+                setS(() => _bitRate = v!);
+                setState(() => _bitRate = v!);
+              },
+            ),
+          ),
+          _SettingRow(
+            label: '帧率',
+            child: DropdownButton<int>(
+              value: _maxFps,
+              dropdownColor: AppTheme.bg1,
+              style: const TextStyle(color: AppTheme.textPrimary,
+                fontFamily: 'JetBrainsMono', fontSize: 12),
+              underline: const SizedBox(),
+              items: const [
+                DropdownMenuItem(value: 15, child: Text('15 fps')),
+                DropdownMenuItem(value: 30, child: Text('30 fps')),
+                DropdownMenuItem(value: 60, child: Text('60 fps')),
+              ],
+              onChanged: (v) {
+                setS(() => _maxFps = v!);
+                setState(() => _maxFps = v!);
+              },
+            ),
+          ),
+        ]),
+        actions: [
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: AppTheme.primary),
+            onPressed: () => Navigator.pop(context),
+            child: const Text('确定'),
+          ),
+        ],
+      )),
     );
   }
 
@@ -619,7 +565,7 @@ class RemoteScreenState extends State<RemoteScreen>
         title: Text(title, style: const TextStyle(
           color: AppTheme.textPrimary, fontFamily: 'SpaceMono', fontSize: 14)),
         children: List.generate(options.length, (i) {
-          final opt = options[i];
+          final opt   = options[i];
           final label = labels != null ? labels[i] : opt.toString();
           return SimpleDialogOption(
             onPressed: () { Navigator.pop(context); onSelect(opt); },
@@ -644,15 +590,16 @@ class RemoteScreenState extends State<RemoteScreen>
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-//  虚拟导航栏
-// ─────────────────────────────────────────────────────────────
+// ── 虚拟导航栏 ──────────────────────────────────────────────────────────────
+
 class _NavBar extends StatelessWidget {
   final VoidCallback onBack;
   final VoidCallback onHome;
   final VoidCallback onRecent;
   final VoidCallback onMenu;
-  const _NavBar({required this.onBack, required this.onHome, required this.onRecent, required this.onMenu});
+  const _NavBar({
+    required this.onBack, required this.onHome,
+    required this.onRecent, required this.onMenu});
 
   @override
   Widget build(BuildContext context) {
@@ -662,10 +609,10 @@ class _NavBar extends StatelessWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
-          _NavBtn(icon: Icons.menu_rounded,         onTap: onMenu,   tooltip: '菜单'),
-          _NavBtn(icon: Icons.arrow_back_rounded,   onTap: onBack,   tooltip: '返回'),
-          _NavBtn(icon: Icons.circle_outlined,      onTap: onHome,   tooltip: '主页'),
-          _NavBtn(icon: Icons.crop_square_rounded,  onTap: onRecent, tooltip: '最近任务'),
+          _NavBtn(icon: Icons.menu_rounded,        onTap: onMenu,   tooltip: '菜单'),
+          _NavBtn(icon: Icons.arrow_back_rounded,  onTap: onBack,   tooltip: '返回'),
+          _NavBtn(icon: Icons.circle_outlined,     onTap: onHome,   tooltip: '主页'),
+          _NavBtn(icon: Icons.crop_square_rounded, onTap: onRecent, tooltip: '最近任务'),
         ],
       ),
     );
@@ -689,16 +636,15 @@ class _NavBtn extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-//  配置行
-// ─────────────────────────────────────────────────────────────
+// ── 配置行 ──────────────────────────────────────────────────────────────────
+
 class _ConfigTile extends StatelessWidget {
-  final String label;
-  final String value;
+  final String label, value;
   final IconData icon;
   final VoidCallback? onTap;
   const _ConfigTile({
-    required this.label, required this.value, required this.icon, this.onTap});
+    required this.label, required this.value,
+    required this.icon, this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -709,10 +655,12 @@ class _ConfigTile extends StatelessWidget {
         fontFamily: 'SpaceMono', fontSize: 13, color: AppTheme.textPrimary)),
       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
         Text(value, style: const TextStyle(
-          fontFamily: 'JetBrainsMono', fontSize: 12, color: AppTheme.textSecondary)),
+          fontFamily: 'JetBrainsMono', fontSize: 12,
+          color: AppTheme.textSecondary)),
         if (onTap != null) ...[
           const SizedBox(width: 4),
-          const Icon(Icons.chevron_right_rounded, size: 16, color: AppTheme.textMuted),
+          const Icon(Icons.chevron_right_rounded,
+              size: 16, color: AppTheme.textMuted),
         ],
       ]),
       onTap: onTap,
@@ -731,7 +679,8 @@ class _SettingRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(children: [
         SizedBox(width: 80, child: Text(label, style: const TextStyle(
-          fontFamily: 'SpaceMono', fontSize: 12, color: AppTheme.textSecondary))),
+          fontFamily: 'SpaceMono', fontSize: 12,
+          color: AppTheme.textSecondary))),
         const Spacer(),
         child,
       ]),
@@ -744,7 +693,7 @@ class _MenuRow extends StatelessWidget {
   final String label;
   final Color color;
   const _MenuRow({required this.icon, required this.label,
-    this.color = AppTheme.textPrimary});
+      this.color = AppTheme.textPrimary});
 
   @override
   Widget build(BuildContext context) {
