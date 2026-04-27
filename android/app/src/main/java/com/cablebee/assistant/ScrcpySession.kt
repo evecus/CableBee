@@ -126,12 +126,15 @@ class ScrcpySession(
             try {
                 videoSocket = Socket("127.0.0.1", SCRCPY_PORT)
                 break
-            } catch (_: IOException) {
+            } catch (e: IOException) {
                 attempt++
-                Thread.sleep(200)
+                Log.w(TAG, "connect attempt $attempt failed: ${e.message}")
+                onEvent("status", mapOf("msg" to "连接中... ($attempt/20)"))
+                Thread.sleep(300)
             }
         }
-        val vSock = videoSocket ?: throw IOException("无法连接 scrcpy server（尝试20次）")
+        val vSock = videoSocket
+            ?: throw IOException("无法连接 scrcpy server（尝试20次均失败）\n请检查：1.设备已授权ADB 2.scrcpy-server已正确推送")
 
         // 5. 连接 control socket
         controlSocket = Socket("127.0.0.1", SCRCPY_PORT)
@@ -194,35 +197,40 @@ class ScrcpySession(
         maxSize: Int, bitRate: Int, maxFps: Int,
     ) {
         // scrcpy 3.x 启动格式
+        val androidData = if (serverPath.startsWith("/sdcard")) "ANDROID_DATA=/sdcard " else ""
         val cmd = buildString {
             append("CLASSPATH=$serverPath ")
-            if (serverPath.startsWith("/sdcard")) append("ANDROID_DATA=/sdcard ")
-            append("app_process / com.genymobile.scrcpy.Server $SCRCPY_VERSION ")
+            append(androidData)
+            append("app_process /system/bin com.genymobile.scrcpy.Server $SCRCPY_VERSION ")
             append("tunnel_forward=true ")
             append("video=true ")
             append("audio=false ")
             append("control=true ")
             append("send_device_meta=true ")
             append("send_frame_meta=true ")
-            append("send_dummy_byte=false ")
             append("raw_video_stream=false ")
             if (maxSize > 0) append("max_size=$maxSize ")
             append("video_bit_rate=$bitRate ")
             if (maxFps > 0) append("max_fps=$maxFps ")
             append("video_codec=h264 ")
             append("lock_video_orientation=-1 ")
-            append("display_id=0 ")
+            append("display_id=0")
         }
         // 后台运行，不等待
         Thread {
             try {
-                ProcessBuilder(adbExec, "-s", serial, "shell", cmd)
+                val proc = ProcessBuilder(adbExec, "-s", serial, "shell", cmd)
                     .redirectErrorStream(true)
                     .start()
-                    .also {
-                        // 不 waitFor，让 server 在后台持续运行
-                        Log.i(TAG, "server process started")
+                // 读输出日志（server 启动失败时会有错误信息）
+                val output = proc.inputStream.bufferedReader().readText()
+                if (output.isNotBlank()) {
+                    Log.i(TAG, "server output: $output")
+                    if (output.contains("error", ignoreCase = true) ||
+                        output.contains("exception", ignoreCase = true)) {
+                        onEvent("error", mapOf("message" to "server启动失败: $output"))
                     }
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "startServer failed", e)
             }
