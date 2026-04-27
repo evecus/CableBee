@@ -1051,9 +1051,11 @@ class AppsScreenState extends State<AppsScreen>
 
   // 选择本机已安装应用，提取 APK 安装到被连接设备
   Future<void> _installFromLocalApp() async {
-    final apkPath = await Navigator.push<String>(
-      context,
-      MaterialPageRoute(builder: (_) => const LocalAppsPicker()),
+    final apkPath = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => const LocalAppsPicker(),
     );
     if (apkPath == null || !mounted) return;
     setState(() {
