@@ -303,7 +303,6 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
-    }
 
         // ── LOCAL APPS ────────────────────────────────────────────────────
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, LOCAL_APPS_CHANNEL)
