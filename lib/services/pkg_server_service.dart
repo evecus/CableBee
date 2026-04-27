@@ -81,11 +81,13 @@ class PkgInfo {
 }
 
 class PkgServerService {
-  static const _remoteDex  = '/sdcard/pkgserver.dex';
-  static const _assetPath  = 'assets/pkgserver.dex';
+  static const _assetPath    = 'assets/pkgserver.dex';
+  static const _preferredDex = '/data/local/tmp/pkgserver.dex';
+  static const _fallbackDex  = '/sdcard/pkgserver.dex';
 
   final AdbService _adb;
   bool _deployed = false;
+  String? _activeDex; // 实际使用的路径，由 _ensureDeployed 决定
 
   PkgServerService(this._adb);
 
@@ -98,8 +100,10 @@ class PkgServerService {
   /// Fetch info for a single package.
   Future<PkgInfo?> getPackage(String packageName) async {
     await _ensureDeployed();
+    final dex = _activeDex!;
+    final androidData = dex.startsWith('/sdcard') ? 'ANDROID_DATA=/sdcard ' : '';
     final res = await _adb.shell(
-        'CLASSPATH=$_remoteDex ANDROID_DATA=/sdcard '
+        'CLASSPATH=$dex ${androidData}'
         'app_process /system/bin '
         'com.cablebee.pkgserver.Main '
         '"$packageName" 2>/dev/null');
@@ -113,18 +117,19 @@ class PkgServerService {
   }
 
   /// Force re-deploy on next call (e.g. after reconnect).
-  void invalidate() => _deployed = false;
+  void invalidate() {
+    _deployed = false;
+    _activeDex = null;
+  }
 
   // ── Internal ───────────────────────────────────────────────────────────────
 
   Stream<PkgInfo> _run() async* {
     await _ensureDeployed();
-
-    // app_process launches the JVM in the shell context — no install needed.
-    // -Djava.class.path tells it where to find our dex.
-    // stdout is line-buffered JSON; stderr has progress messages.
+    final dex = _activeDex!;
+    final androidData = dex.startsWith('/sdcard') ? 'ANDROID_DATA=/sdcard ' : '';
     final res = await _adb.shell(
-        'CLASSPATH=$_remoteDex ANDROID_DATA=/sdcard '
+        'CLASSPATH=$dex ${androidData}'
         'app_process /system/bin '
         'com.cablebee.pkgserver.Main '
         '2>/dev/null',
@@ -142,27 +147,44 @@ class PkgServerService {
     }
   }
 
-  /// Push dex to device if not already done this session.
+  /// 优先推送到 /data/local/tmp，失败则 fallback 到 /sdcard。
   Future<void> _ensureDeployed() async {
-    if (_deployed) return;
+    if (_deployed && _activeDex != null) return;
 
-    // Check if already present with correct size
-    final checkRes = await _adb.shell('wc -c < $_remoteDex 2>/dev/null');
-    final remoteSize = int.tryParse(checkRes.stdout.trim()) ?? 0;
-
-    // Load dex from Flutter assets
     final ByteData assetData = await rootBundle.load(_assetPath);
     final int localSize = assetData.lengthInBytes;
 
-    if (remoteSize == localSize) {
-      // Already up to date
-      _deployed = true;
-      return;
+    for (final dexPath in [_preferredDex, _fallbackDex]) {
+      // 检查远端文件大小是否一致，一致则直接复用
+      final checkRes = await _adb.shell('wc -c < $dexPath 2>/dev/null');
+      final remoteSize = int.tryParse(checkRes.stdout.trim()) ?? 0;
+      if (remoteSize == localSize) {
+        _activeDex = dexPath;
+        _deployed = true;
+        return;
+      }
+
+      // 尝试推送
+      try {
+        await _adb.pushAsset(_assetPath, dexPath);
+        // 验证推送成功
+        final verifyRes = await _adb.shell('wc -c < $dexPath 2>/dev/null');
+        final pushedSize = int.tryParse(verifyRes.stdout.trim()) ?? 0;
+        if (pushedSize == localSize) {
+          // /data/local/tmp 支持 chmod；/sdcard 是 FUSE 不支持，忽略错误
+          await _adb.shell('chmod 644 $dexPath 2>/dev/null');
+          _activeDex = dexPath;
+          _deployed = true;
+          return;
+        }
+      } catch (_) {
+        // 推送失败，尝试下一个路径
+        continue;
+      }
     }
 
-    // Push dex via adb push (through MethodChannel in adb_service)
-    await _adb.pushAsset(_assetPath, _remoteDex);
-    // /sdcard 是 FAT/FUSE 文件系统，不需要也不支持 chmod
-    _deployed = true;
+    // 两个路径都失败
+    throw Exception('无法将 pkgserver.dex 推送到被连接设备，'
+        '请确认设备已授权 ADB 调试');
   }
 }
