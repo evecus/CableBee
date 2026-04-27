@@ -81,8 +81,7 @@ class PkgInfo {
 }
 
 class PkgServerService {
-  static const _remoteDir  = '/data/local/tmp';
-  static const _remoteDex  = '$_remoteDir/cablebee_pkgserver.dex';
+  static const _remoteDex  = '/sdcard/pkgserver.dex';
   static const _assetPath  = 'assets/pkgserver.dex';
 
   final AdbService _adb;
@@ -100,7 +99,8 @@ class PkgServerService {
   Future<PkgInfo?> getPackage(String packageName) async {
     await _ensureDeployed();
     final res = await _adb.shell(
-        'CLASSPATH=$_remoteDex app_process /system/bin '
+        'CLASSPATH=$_remoteDex ANDROID_DATA=/sdcard '
+        'app_process /system/bin '
         'com.cablebee.pkgserver.Main '
         '"$packageName" 2>/dev/null');
     for (final line in res.stdout.split('\n')) {
@@ -124,7 +124,8 @@ class PkgServerService {
     // -Djava.class.path tells it where to find our dex.
     // stdout is line-buffered JSON; stderr has progress messages.
     final res = await _adb.shell(
-        'CLASSPATH=$_remoteDex app_process /system/bin '
+        'CLASSPATH=$_remoteDex ANDROID_DATA=/sdcard '
+        'app_process /system/bin '
         'com.cablebee.pkgserver.Main '
         '2>/dev/null',
         timeoutMs: 120000); // 2 min for large package lists
@@ -161,7 +162,7 @@ class PkgServerService {
 
     // Push dex via adb push (through MethodChannel in adb_service)
     await _adb.pushAsset(_assetPath, _remoteDex);
-    await _adb.shell('chmod 644 $_remoteDex');
+    // /sdcard 是 FAT/FUSE 文件系统，不需要也不支持 chmod
     _deployed = true;
   }
 }
