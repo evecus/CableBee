@@ -86,11 +86,11 @@ jobs:
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
         run: |
           cat > android/key.properties <<EOF
-storePassword=$STORE_PASSWORD
-keyPassword=$KEY_PASSWORD
-keyAlias=$KEY_ALIAS
-storeFile=keystore.jks
-EOF
+          storePassword=$STORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=keystore.jks
+          EOF
 
       # ── Build APKs ────────────────────────────────────────────────
       - name: Build APKs (arm64-v8a / armeabi-v7a / x86_64)
