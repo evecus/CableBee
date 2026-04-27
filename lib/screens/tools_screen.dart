@@ -1,8 +1,9 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/adb_service.dart';
 import '../utils/theme.dart';
 import '../widgets/common.dart';
@@ -29,7 +30,6 @@ class ToolsScreenState extends State<ToolsScreen>
     });
   }
 
-  String? _screenshotPath;
   bool _takingScreenshot = false;
   String? _resultMsg;
   bool _resultOk = true;
@@ -43,18 +43,20 @@ class ToolsScreenState extends State<ToolsScreen>
   // ── 截图 ────────────────────────────────────────────────────────────────────
 
   Future<void> _takeScreenshot() async {
-    setState(() { _takingScreenshot = true; _screenshotPath = null; _resultMsg = null; });
-    final dir = await getExternalStorageDirectory() ??
-        await getApplicationDocumentsDirectory();
-    final path = '${dir.path}/cablebee_sc_${DateTime.now().millisecondsSinceEpoch}.png';
+    setState(() { _takingScreenshot = true; _resultMsg = null; });
+    final prefs = await SharedPreferences.getInstance();
+    final saveDir = prefs.getString('local_save_path') ??
+        (await getExternalStorageDirectory() ??
+         await getApplicationDocumentsDirectory()).path;
+    await Directory(saveDir).create(recursive: true);
+    final path = '$saveDir/screenshot_${DateTime.now().millisecondsSinceEpoch}.png';
     final res = await context.read<AdbService>().screenshot(path);
     setState(() {
       _takingScreenshot = false;
       if (res.isSuccess && File(path).existsSync()) {
-        _screenshotPath = path;
-        _showResult('截图已保存至 $path');
+        _showResult('✓ 截图已保存至 $path');
       } else {
-        _showResult('截图失败：${res.stderr}', ok: false);
+        _showResult('✗ 截图失败：${res.stderr}', ok: false);
       }
     });
   }
@@ -259,30 +261,6 @@ class ToolsScreenState extends State<ToolsScreen>
             ],
           ),
 
-          // 截图预览
-          if (_screenshotPath != null) ...[
-            const SizedBox(height: 8),
-            Container(
-              decoration: BoxDecoration(
-                color: AppTheme.bg1,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: AppTheme.bg3),
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(12),
-                child: Image.file(File(_screenshotPath!),
-                  fit: BoxFit.contain,
-                  errorBuilder: (_, __, ___) => const Padding(
-                    padding: EdgeInsets.all(16),
-                    child: Text('预览不可用', style: TextStyle(
-                      fontFamily: 'JetBrainsMono', fontSize: 12,
-                      color: AppTheme.textMuted,
-                    )),
-                  ),
-                ),
-              ),
-            ),
-          ],
 
           // ══════════════════════════════════════════════════════════
           // 电源
