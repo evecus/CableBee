@@ -4,8 +4,12 @@
 // push/pull 通过原生 SYNC 协议实现。
 
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 import '../models/device.dart';
 import 'binary_manager.dart';
 
@@ -167,6 +171,24 @@ class AdbService extends ChangeNotifier {
     }
   }
 
+  /// 将 Flutter asset 写到本机临时文件后推送到设备。
+  /// [assetPath]  如 'assets/pkgserver.dex'
+  /// [remotePath] 设备上的目标路径
+  Future<AdbCommandResult> pushAsset(String assetPath, String remotePath) async {
+    if (!hasDevice) return _noDevice();
+    try {
+      // 写到 app cache 目录
+      final data = await rootBundle.load(assetPath);
+      final tmpFile = File(
+        '${(await getTemporaryDirectory()).path}/${assetPath.split('/').last}',
+      );
+      await tmpFile.writeAsBytes(data.buffer.asUint8List(), flush: true);
+      return push(tmpFile.path, remotePath);
+    } catch (e) {
+      return AdbCommandResult(exitCode: 1, stdout: '', stderr: e.toString());
+    }
+  }
+
   /// 从设备拉取文件到本机。
   /// [remotePath] 设备上的绝对路径。
   /// [localPath]  本机保存路径。
@@ -187,9 +209,7 @@ class AdbService extends ChangeNotifier {
   // ── 文件列表 ──────────────────────────────────────────────────────────────
 
   Future<List<FileEntry>> listFiles(String path) async {
-    // 末尾加 / 强制跟随符号链接（ls 把 /sdcard 当目录而非链接处理）
-    final safePath = path.endsWith('/') ? path : '$path/';
-    final result = await shell('ls -la "$safePath" 2>&1');
+    final result = await shell('ls -la "$path" 2>&1');
     return result.stdout
         .split('\n')
         .map(FileEntry.parseLsLine)
@@ -205,16 +225,73 @@ class AdbService extends ChangeNotifier {
     return result.stdout.split('\n')
         .where((l) => l.startsWith('package:'))
         .map((l) {
-          final raw = l.substring(8);
-          final eqIdx = raw.lastIndexOf('=');
-          if (eqIdx <= 0) return null;
-          final apkPath = raw.substring(0, eqIdx).trim();
-          final packageName = raw.substring(eqIdx + 1).trim();
+          final raw = l.substring(8); // 去掉 "package:"
+          // 格式: /data/app/~~hash/com.pkg-hash==/base.apk=com.pkg
+          // 用最后一个 '=' 分割，左边是 apkPath，右边是 packageName
+          final lastEq = raw.lastIndexOf('=');
+          if (lastEq < 0) return null;
+          final apkPath = raw.substring(0, lastEq);
+          final packageName = raw.substring(lastEq + 1).trim();
           if (packageName.isEmpty) return null;
           return AppInfo(apkPath: apkPath, packageName: packageName);
         })
         .whereType<AppInfo>()
         .toList();
+  }
+
+  /// 从 APK 提取 launcher icon，返回 PNG 字节；失败返回 null。
+  /// 策略：用设备上的 unzip 列出文件 → 找最高分辨率 mipmap/ic_launcher*.png → base64 输出
+  Future<Uint8List?> loadAppIcon(String apkPath) async {
+    if (!hasDevice) return null;
+    try {
+      // 列出 APK 内所有 png 文件
+      final listRes = await shell('unzip -l "$apkPath" "*.png" 2>/dev/null');
+      if (!listRes.isSuccess && listRes.stdout.isEmpty) return null;
+
+      // 筛选 mipmap 或 drawable 下的 ic_launcher
+      final lines = listRes.stdout.split('\n');
+      final candidates = lines
+          .map((l) => l.trim().split(RegExp(r'\s+')).last)
+          .where((f) =>
+              f.endsWith('.png') &&
+              (f.contains('mipmap') || f.contains('drawable')) &&
+              (f.contains('ic_launcher') || f.contains('icon')))
+          .toList();
+
+      // 按分辨率优先级排序
+      int rank(String f) {
+        if (f.contains('xxxhdpi')) return 0;
+        if (f.contains('xxhdpi'))  return 1;
+        if (f.contains('xhdpi'))   return 2;
+        if (f.contains('hdpi'))    return 3;
+        if (f.contains('mdpi'))    return 4;
+        return 5;
+      }
+      candidates.sort((a, b) => rank(a).compareTo(rank(b)));
+
+      // 没有精确匹配则取任意 mipmap/drawable png
+      String? target;
+      if (candidates.isNotEmpty) {
+        target = candidates.first;
+      } else {
+        target = lines
+            .map((l) => l.trim().split(RegExp(r'\s+')).last)
+            .where((f) =>
+                f.endsWith('.png') &&
+                (f.contains('mipmap') || f.contains('drawable')))
+            .firstOrNull;
+      }
+      if (target == null) return null;
+
+      // 解压单个文件并 base64 输出
+      final b64Res = await shell(
+          'unzip -p "$apkPath" "$target" 2>/dev/null | base64 2>/dev/null');
+      if (!b64Res.isSuccess || b64Res.stdout.trim().isEmpty) return null;
+
+      return base64Decode(b64Res.stdout.trim().replaceAll('\n', ''));
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<AdbCommandResult> installApk(String localPath) =>
@@ -382,114 +459,6 @@ class AdbService extends ChangeNotifier {
 
   // ── 工具方法 ──────────────────────────────────────────────────────────────
 
-
-  // ── 应用标签与图标 ──────────────────────────────────────────────────────────
-
-  /// 批量获取应用标签。
-  /// 策略：① cmd package --show-labels  ② dumpsys package nonLocalizedLabel
-  Future<Map<String, String>> getAppLabels(List<String> packages) async {
-    final labelMap = <String, String>{};
-
-    // 方案一
-    try {
-      final res = await shell('cmd package list packages --show-labels 2>&1');
-      if (res.isSuccess && res.stdout.contains('label:')) {
-        for (final line in res.stdout.split('\n')) {
-          final pm = RegExp(r'package:(\S+)').firstMatch(line);
-          final lm = RegExp(r'label:(.+)$').firstMatch(line);
-          if (pm != null && lm != null) {
-            final lbl = lm.group(1)!.trim();
-            if (lbl.isNotEmpty && !lbl.startsWith('@')) {
-              labelMap[pm.group(1)!.trim()] = lbl;
-            }
-          }
-        }
-        if (labelMap.length > packages.length ~/ 2) return labelMap;
-      }
-    } catch (_) {}
-
-    // 方案二：每批 8 个，用 echo 分隔输出
-    const batchSize = 8;
-    for (var i = 0; i < packages.length; i += batchSize) {
-      final batch = packages.skip(i).take(batchSize).toList();
-      final cmd = batch
-          .map((p) => 'echo "##PKG:$p##"; dumpsys package $p 2>/dev/null | grep -m1 nonLocalizedLabel')
-          .join('; ');
-      try {
-        final res = await shell(cmd, timeoutMs: 30000);
-        String? cur;
-        for (final line in res.stdout.split('\n')) {
-          final pm = RegExp(r'##PKG:(.+?)##').firstMatch(line.trim());
-          if (pm != null) { cur = pm.group(1)!.trim(); continue; }
-          if (cur != null) {
-            final m = RegExp(r'nonLocalizedLabel=(\S.+?)(\s|$)').firstMatch(line);
-            if (m != null) {
-              final lbl = m.group(1)!.trim();
-              if (lbl != 'null' && !lbl.startsWith('@')) labelMap[cur] = lbl;
-            }
-            cur = null;
-          }
-        }
-      } catch (_) {}
-    }
-    return labelMap;
-  }
-
-  /// 提取单个应用图标 PNG 字节（无需 aapt，直接从 APK ZIP 中提取）。
-  Future<List<int>?> getAppIcon(String apkPath) async {
-    // 尝试常见图标路径（密度从高到低）
-    const densities = ['xxxhdpi-v4','xxhdpi-v4','xhdpi-v4','hdpi-v4','xxxhdpi','xxhdpi','xhdpi','hdpi','mdpi'];
-    const names     = ['ic_launcher','ic_launcher_round','icon','app_icon','ic_launcher_foreground'];
-    const dirs      = ['mipmap','drawable'];
-
-    for (final density in densities) {
-      for (final dir in dirs) {
-        for (final name in names) {
-          final entry = 'res/$dir-$density/$name.png';
-          final res = await shell(
-              'unzip -p "$apkPath" "$entry" 2>/dev/null | base64 -w0',
-              timeoutMs: 8000);
-          if (res.isSuccess && res.stdout.trim().length > 20) {
-            final bytes = _b64decode(res.stdout.trim());
-            if (bytes != null && bytes.isNotEmpty) return bytes;
-          }
-        }
-      }
-    }
-
-    // 终极 fallback：找 APK 中任意一个 mipmap/drawable PNG
-    final listRes = await shell(
-        'unzip -l "$apkPath" 2>/dev/null | grep -oE "res/(mipmap|drawable)[^[:space:]]+\\.png" | grep -v "foreground\\|background\\|_night" | tail -1',
-        timeoutMs: 5000);
-    final entry = listRes.stdout.trim();
-    if (entry.isNotEmpty) {
-      final res = await shell(
-          'unzip -p "$apkPath" "$entry" 2>/dev/null | base64 -w0',
-          timeoutMs: 8000);
-      if (res.isSuccess && res.stdout.trim().length > 20) {
-        return _b64decode(res.stdout.trim());
-      }
-    }
-    return null;
-  }
-
-  static List<int>? _b64decode(String s) {
-    try {
-      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-      final lookup = <int, int>{};
-      for (var i = 0; i < chars.length; i++) lookup[chars.codeUnitAt(i)] = i;
-      final clean = s.replaceAll(RegExp(r'\s'), '');
-      final out = <int>[];
-      var buf = 0, bits = 0;
-      for (final c in clean.codeUnits) {
-        final v = lookup[c]; if (v == null) continue;
-        buf = (buf << 6) | v; bits += 6;
-        if (bits >= 8) { bits -= 8; out.add((buf >> bits) & 0xff); }
-      }
-      return out.isEmpty ? null : out;
-    } catch (_) { return null; }
-  }
-
   Future<T?> _invoke<T>(String method, Map<String, dynamic> args) =>
       _ch.invokeMethod<T>(method, args);
 
@@ -527,28 +496,20 @@ class FileEntry {
              required this.permissions, required this.size, required this.date});
 
   static FileEntry? parseLsLine(String line) {
-    final trimmed = line.trim();
-    if (trimmed.isEmpty) return null;
-    final parts = trimmed.split(RegExp(r'\s+'));
-    if (parts.length < 5) return null;
+    final parts = line.trim().split(RegExp(r'\s+'));
+    if (parts.length < 8) return null;
     final perms = parts[0];
     if (!perms.startsWith('-') && !perms.startsWith('d') && !perms.startsWith('l')) return null;
-
-    // Android ls -la: perms [硬链接数] owner group size date time name
-    // 部分 Android ls 无硬链接列，通过 parts[1] 是否为纯数字判断
-    final hasLink = int.tryParse(parts[1]) != null;
-    final o = hasLink ? 1 : 0;
-    if (parts.length < 7 + o) return null;
-
-    final size = parts[3 + o];
-    final date = '${parts[4 + o]} ${parts[5 + o]}';
-    final rawName = parts.sublist(6 + o).join(' ');
-    // 符号链接去掉 " -> target"
-    final name = perms.startsWith('l') ? rawName.split(' -> ').first.trim() : rawName;
+    // symlink 格式: lrwxrwxrwx ... name -> target
+    // 只取 '->' 前的部分作为 name，symlink 视为目录（可导航）
+    final rawName = parts.sublist(7).join(' ');
+    final arrowIdx = rawName.indexOf(' -> ');
+    final name = arrowIdx >= 0 ? rawName.substring(0, arrowIdx) : rawName;
     if (name == '.' || name == '..') return null;
+    final isDir = perms.startsWith('d') || perms.startsWith('l');
     return FileEntry(
-      permissions: perms, isDirectory: perms.startsWith('d'),
-      size: size, date: date, name: name,
+      permissions: perms, isDirectory: isDir,
+      size: parts[4], date: '${parts[5]} ${parts[6]}', name: name,
     );
   }
 }
