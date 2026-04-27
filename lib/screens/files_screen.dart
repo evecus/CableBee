@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -79,6 +80,17 @@ class FilesScreenState extends State<FilesScreen>
     ]);
   }
 
+
+  /// 读取设置中的本机保存路径，fallback 到系统下载目录
+  Future<String> _localSaveDir() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString('local_save_path');
+    if (saved != null && saved.isNotEmpty) return saved;
+    final dir = await getExternalStorageDirectory() ??
+        await getApplicationDocumentsDirectory();
+    return dir.path;
+  }
+
   Future<void> _loadDir(String path) async {
     final adb = context.read<AdbService>();
     setState(() {
@@ -156,10 +168,9 @@ class FilesScreenState extends State<FilesScreen>
 
   Future<void> _pullFile(FileEntry entry) async {
     final adb = context.read<AdbService>();
-    await adb.shell('mkdir -p "$_downloadPath"');
-    final localDir = await getExternalStorageDirectory() ??
-        await getApplicationDocumentsDirectory();
-    final localSave = '${localDir.path}/${entry.name}';
+    final saveDir = await _localSaveDir();
+    await Directory(saveDir).create(recursive: true);
+    final localSave = '$saveDir/${entry.name}';
     setState(() {
       _transferring = true;
       _transferMessage = '下载 ${entry.name}...';
@@ -210,11 +221,10 @@ class FilesScreenState extends State<FilesScreen>
         onDownload: () async {
           Navigator.pop(context);
           final adb = context.read<AdbService>();
-          await adb.shell('mkdir -p "$_downloadPath"');
+          final saveDir = await _localSaveDir();
+          await Directory(saveDir).create(recursive: true);
           for (final name in names) {
-            final localDir = await getExternalStorageDirectory() ??
-                await getApplicationDocumentsDirectory();
-            final localSave = '${localDir.path}/$name';
+            final localSave = '$saveDir/$name';
             setState(() {
               _transferring = true;
               _transferMessage = '下载 $name...';
