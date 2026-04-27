@@ -8,6 +8,8 @@ import '../services/adb_service.dart';
 import '../services/pkg_server_service.dart';
 import '../utils/theme.dart';
 import '../widgets/common.dart';
+import '../widgets/local_file_picker.dart';
+import 'local_apps_picker.dart';
 
 // ── 排序方式枚举 ──────────────────────────────────────────────────────────────
 
@@ -963,20 +965,103 @@ class AppsScreenState extends State<AppsScreen>
     });
   }
 
-  Future<void> _installApk() async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['apk'],
+  // 弹出安装方式选择
+  void _showInstallDialog() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppTheme.bg1,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+              child: Row(children: [
+                const Icon(Icons.install_mobile_rounded,
+                    size: 18, color: AppTheme.primary),
+                const SizedBox(width: 8),
+                const Text('安装 APK', style: TextStyle(
+                  fontFamily: 'SpaceMono', fontSize: 14,
+                  fontWeight: FontWeight.w600, color: AppTheme.textPrimary,
+                )),
+              ]),
+            ),
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.folder_open_rounded,
+                  size: 20, color: AppTheme.primary),
+              title: const Text('选择本地文件', style: TextStyle(
+                  fontSize: 14, color: AppTheme.textPrimary)),
+              subtitle: const Text('在本机目录中选择 APK 文件', style: TextStyle(
+                  fontSize: 11, color: AppTheme.textMuted,
+                  fontFamily: 'JetBrainsMono')),
+              onTap: () {
+                Navigator.pop(context);
+                _installFromLocalFile();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.apps_rounded,
+                  size: 20, color: AppTheme.secondary),
+              title: const Text('选择本机已安装应用', style: TextStyle(
+                  fontSize: 14, color: AppTheme.textPrimary)),
+              subtitle: const Text('提取本机已安装应用的 APK 安装到被连接设备', style: TextStyle(
+                  fontSize: 11, color: AppTheme.textMuted,
+                  fontFamily: 'JetBrainsMono')),
+              onTap: () {
+                Navigator.pop(context);
+                _installFromLocalApp();
+              },
+            ),
+            const SizedBox(height: 4),
+          ]),
+        ),
+      ),
     );
-    if (result == null || result.files.single.path == null) return;
-    final path = result.files.single.path!;
+  }
 
+  // 选择本地 APK 文件安装
+  Future<void> _installFromLocalFile() async {
+    final results = await showLocalFilePicker(
+      context,
+      allowMultiple: false,
+      allowFolders: false,
+    );
+    if (results == null || results.isEmpty) return;
+    final path = results.first;
+    if (!path.toLowerCase().endsWith('.apk')) {
+      setState(() => _actionResult = '✗ 请选择 .apk 文件');
+      return;
+    }
     setState(() {
       _loading = true;
-      _actionResult = '正在安装 ${result.files.single.name}...';
+      _actionResult = '正在安装 ${path.split('/').last}...';
     });
     final adb = context.read<AdbService>();
     final res = await adb.installApk(path);
+    setState(() {
+      _loading = false;
+      _actionResult = res.output;
+    });
+    if (res.isSuccess) _loadApps();
+  }
+
+  // 选择本机已安装应用，提取 APK 安装到被连接设备
+  Future<void> _installFromLocalApp() async {
+    final apkPath = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (_) => const LocalAppsPicker()),
+    );
+    if (apkPath == null || !mounted) return;
+    setState(() {
+      _loading = true;
+      _actionResult = '正在安装 ${apkPath.split('/').last}...';
+    });
+    final adb = context.read<AdbService>();
+    final res = await adb.installApk(apkPath);
     setState(() {
       _loading = false;
       _actionResult = res.output;
@@ -1082,11 +1167,11 @@ class AppsScreenState extends State<AppsScreen>
         ),
       ]),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: _installApk,
+        onPressed: _showInstallDialog,
         backgroundColor: AppTheme.primary,
         foregroundColor: AppTheme.bg0,
         icon: const Icon(Icons.install_mobile_rounded, size: 18),
-        label: const Text('Install APK',
+        label: const Text('安装',
             style: TextStyle(
               fontFamily: 'SpaceMono',
               fontSize: 12,
