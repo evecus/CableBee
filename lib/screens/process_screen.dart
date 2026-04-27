@@ -1,9 +1,12 @@
 // lib/screens/process_screen.dart
 // 进程管理页面：显示设备内存概览 + 运行进程列表（按内存降序），支持 force-stop
 
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/adb_service.dart';
+import '../services/pkg_server_service.dart';
 import '../utils/theme.dart';
 import '../widgets/common.dart';
 
@@ -11,8 +14,16 @@ import '../widgets/common.dart';
 
 class _ProcInfo {
   final String pkg;
-  final int kbRss; // 单位 KB
+  final int kbRss;
+  String? label;
+  Uint8List? iconBytes;
+
   _ProcInfo({required this.pkg, required this.kbRss});
+
+  String get displayName {
+    if (label != null && label!.isNotEmpty) return label!;
+    return pkg.contains('.') ? pkg.split('.').last : pkg;
+  }
 }
 
 // ── Screen ───────────────────────────────────────────────────────────────────
@@ -35,6 +46,9 @@ class ProcessScreenState extends State<ProcessScreen>
   int _totalKb = 0;
   int _usedKb  = 0;
   List<_ProcInfo> _procs = [];
+
+  final Map<String, PkgInfo> _pkgCache = {};
+  PkgServerService? _pkgServer;
 
   @override
   void initState() {
@@ -59,8 +73,8 @@ class ProcessScreenState extends State<ProcessScreen>
     if (!mounted) return;
     setState(() => _loading = true);
     final adb = context.read<AdbService>();
+    _pkgServer ??= PkgServerService(adb);
 
-    // ① 总内存 & 可用内存
     final memRes = await adb.shell(
         'cat /proc/meminfo | grep -E "^MemTotal:|^MemAvailable:"');
     int totalKb = 0, availKb = 0;
@@ -72,9 +86,6 @@ class ProcessScreenState extends State<ProcessScreen>
       if (m.group(1) == 'MemAvailable') availKb = kb;
     }
 
-    // ② 进程内存：解析 dumpsys meminfo "Total PSS by process" 段
-    // 行格式:  "   166,712K: system_server (pid 659)"
-    // 用 sed 提取：包名($2) 和内存KB($1去掉K:和逗号)
     final procRes = await adb.shell(
         r"dumpsys meminfo 2>/dev/null | grep -E '^\s+[0-9,]+K:' | "
         r"sed 's/,//g; s/K://' | awk '{kb=$1; pkg=$2; if(pkg~/\(/)pkg=$2; print pkg, kb}' | "
@@ -90,7 +101,6 @@ class ProcessScreenState extends State<ProcessScreen>
       procs.add(_ProcInfo(pkg: pkg, kbRss: kb));
     }
 
-    // fallback：用 ps + cat /proc/PID/status
     if (procs.isEmpty) {
       final psRes = await adb.shell(
           'ps -A -o NAME,RSS 2>/dev/null | tail -n +2');
@@ -113,6 +123,47 @@ class ProcessScreenState extends State<ProcessScreen>
         _loading = false;
       });
     }
+
+    _enrichWithPkgInfo();
+  }
+
+  Future<void> _enrichWithPkgInfo() async {
+    if (_pkgServer == null) return;
+    final server = _pkgServer!;
+
+    // 先应用缓存
+    for (final proc in _procs) {
+      final cached = _pkgCache[proc.pkg];
+      if (cached != null) {
+        proc.label = cached.label;
+        proc.iconBytes = cached.icon;
+      }
+    }
+    if (mounted) setState(() {});
+
+    // 只查包名（含点的才是应用包名）
+    final toFetch = _procs
+        .where((p) => !_pkgCache.containsKey(p.pkg) && p.pkg.contains('.'))
+        .map((p) => p.pkg)
+        .toSet()
+        .toList();
+
+    for (final pkgName in toFetch) {
+      if (!mounted) return;
+      try {
+        final info = await server.getPackage(pkgName);
+        if (info != null) {
+          _pkgCache[pkgName] = info;
+          for (final proc in _procs) {
+            if (proc.pkg == pkgName) {
+              proc.label = info.label;
+              proc.iconBytes = info.icon;
+            }
+          }
+          if (mounted) setState(() {});
+        }
+      } catch (_) {}
+    }
   }
 
   Future<void> _forceStop(String pkg) async {
@@ -122,12 +173,8 @@ class ProcessScreenState extends State<ProcessScreen>
   }
 
   String _fmt(int kb) {
-    if (kb >= 1024 * 1024) {
-      return '${(kb / 1024 / 1024).toStringAsFixed(2)} GB';
-    }
-    if (kb >= 1024) {
-      return '${(kb / 1024).toStringAsFixed(1)} MB';
-    }
+    if (kb >= 1024 * 1024) return '${(kb / 1024 / 1024).toStringAsFixed(2)} GB';
+    if (kb >= 1024) return '${(kb / 1024).toStringAsFixed(1)} MB';
     return '$kb KB';
   }
 
@@ -145,7 +192,6 @@ class ProcessScreenState extends State<ProcessScreen>
               onRefresh: _load,
               child: CustomScrollView(
                 slivers: [
-                  // ── 内存概览 ──
                   SliverToBoxAdapter(
                     child: Padding(
                       padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
@@ -167,7 +213,6 @@ class ProcessScreenState extends State<ProcessScreen>
                             ],
                           ),
                           const SizedBox(height: 10),
-                          // 进度条
                           ClipRRect(
                             borderRadius: BorderRadius.circular(4),
                             child: LinearProgressIndicator(
@@ -187,7 +232,7 @@ class ProcessScreenState extends State<ProcessScreen>
                           Row(children: [
                             _MemTag(color: AppTheme.primary, label: '已用内存', value: _fmt(_usedKb)),
                             const SizedBox(width: 24),
-                            _MemTag(color: AppTheme.bg3,    label: '可用内存', value: _fmt(_totalKb - _usedKb)),
+                            _MemTag(color: AppTheme.bg3, label: '可用内存', value: _fmt(_totalKb - _usedKb)),
                           ]),
                           const SizedBox(height: 4),
                         ],
@@ -197,7 +242,6 @@ class ProcessScreenState extends State<ProcessScreen>
 
                   const SliverToBoxAdapter(child: Divider(height: 1)),
 
-                  // ── 进程列表 ──
                   if (_procs.isEmpty)
                     const SliverFillRemaining(
                       child: Center(child: Text('暂无进程数据',
@@ -208,30 +252,12 @@ class ProcessScreenState extends State<ProcessScreen>
                       delegate: SliverChildBuilderDelegate(
                         (ctx, i) {
                           final p = _procs[i];
-                          // 图标颜色按包名前缀区分
-                          final isSystem = p.pkg.startsWith('com.android') ||
-                              p.pkg.startsWith('android') ||
-                              p.pkg.startsWith('system');
-                          final iconColor = isSystem ? AppTheme.textMuted : AppTheme.primary;
-                          final icon = isSystem
-                              ? Icons.settings_suggest_rounded
-                              : Icons.apps_rounded;
-
                           return Column(children: [
                             ListTile(
-                              contentPadding:
-                                  const EdgeInsets.fromLTRB(16, 6, 8, 6),
-                              leading: Container(
-                                width: 40, height: 40,
-                                decoration: BoxDecoration(
-                                  color: iconColor.withOpacity(0.1),
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: Icon(icon, size: 20, color: iconColor),
-                              ),
+                              contentPadding: const EdgeInsets.fromLTRB(16, 6, 8, 6),
+                              leading: _ProcIcon(proc: p),
                               title: Text(
-                                // 如果包名含点则取最后一段作为短名，否则直接用包名
-                                p.pkg.contains('.') ? p.pkg.split('.').last : p.pkg,
+                                p.displayName,
                                 style: const TextStyle(
                                   fontFamily: 'SpaceMono', fontSize: 13,
                                   color: AppTheme.textPrimary,
@@ -300,6 +326,46 @@ class ProcessScreenState extends State<ProcessScreen>
     );
   }
 }
+
+// ── 进程图标 Widget ───────────────────────────────────────────────────────────
+
+class _ProcIcon extends StatelessWidget {
+  final _ProcInfo proc;
+  const _ProcIcon({required this.proc});
+
+  @override
+  Widget build(BuildContext context) {
+    final isSystem = proc.pkg.startsWith('com.android') ||
+        proc.pkg.startsWith('android') ||
+        proc.pkg.startsWith('system');
+    final iconColor = isSystem ? AppTheme.textMuted : AppTheme.primary;
+    final fallbackIcon = isSystem
+        ? Icons.settings_suggest_rounded
+        : Icons.apps_rounded;
+
+    return Container(
+      width: 40, height: 40,
+      decoration: BoxDecoration(
+        color: iconColor.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: proc.iconBytes != null
+          ? ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Image.memory(
+                proc.iconBytes!,
+                width: 40, height: 40,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) =>
+                    Icon(fallbackIcon, size: 20, color: iconColor),
+              ),
+            )
+          : Icon(fallbackIcon, size: 20, color: iconColor),
+    );
+  }
+}
+
+// ── _MemTag ───────────────────────────────────────────────────────────────────
 
 class _MemTag extends StatelessWidget {
   final Color color;
