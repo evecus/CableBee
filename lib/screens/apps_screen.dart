@@ -1,7 +1,10 @@
+import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
-import 'dart:typed_data'; 
 import '../services/adb_service.dart';
 import '../services/pkg_server_service.dart';
 import '../utils/theme.dart';
@@ -942,14 +945,12 @@ class AppsScreenState extends State<AppsScreen>
   }
 
   Future<void> _downloadApk(AppInfoEx app) async {
-    // 选择保存路径
-    final savePath = await FilePicker.platform.saveFile(
-      dialogTitle: '保存安装包',
-      fileName: '${app.packageName}.apk',
-      allowedExtensions: ['apk'],
-      type: FileType.custom,
-    );
-    if (savePath == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    final saveDir = prefs.getString('local_save_path') ??
+        (await getExternalStorageDirectory() ??
+         await getApplicationDocumentsDirectory()).path;
+    await Directory(saveDir).create(recursive: true);
+    final savePath = '$saveDir/${app.packageName}.apk';
 
     final adb = context.read<AdbService>();
     setState(() {
