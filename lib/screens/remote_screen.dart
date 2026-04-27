@@ -49,6 +49,7 @@ class RemoteScreenState extends State<RemoteScreen>
 
   // 触摸状态（用于 swipe）
   Offset? _touchStart;
+  Offset? _touchEnd;
   int?    _touchStartMs;
 
   String? _statusMsg;
@@ -528,11 +529,19 @@ class RemoteScreenState extends State<RemoteScreen>
           _touchStartMs = DateTime.now().millisecondsSinceEpoch;
         },
         onPanEnd: (d) {
-          if (_touchStart == null) return;
-          // tap vs swipe 由 onTapUp 处理，这里只做 swipe（移动距离 > 20px）
+          // 由 onPanUpdate 记录的最终位置发送 swipe
+          if (_touchStart == null || _touchEnd == null) return;
+          final dist = (_touchEnd! - _touchStart!).distance;
+          if (dist > 20) {
+            final dur = DateTime.now().millisecondsSinceEpoch - (_touchStartMs ?? 0);
+            _sendSwipe(_touchStart!, _touchEnd!, dur.clamp(80, 2000));
+          }
+          _touchStart = null;
+          _touchEnd   = null;
         },
         onPanUpdate: (d) {
-          // 用于更精准的 swipe：panEnd 触发时发送
+          final box = ctx.findRenderObject() as RenderBox;
+          _touchEnd = _toDevCoord(d.localPosition, box.size);
         },
         onLongPressStart: (d) {
           final box = ctx.findRenderObject() as RenderBox;
@@ -549,6 +558,7 @@ class RemoteScreenState extends State<RemoteScreen>
             _sendSwipe(_touchStart!, end, dur.clamp(100, 2000));
           }
           _touchStart = null;
+          _touchEnd   = null;
         },
         child: Image.memory(
           _frameBytes!,
@@ -567,17 +577,18 @@ class RemoteScreenState extends State<RemoteScreen>
     }
 
     final body = Column(children: [
-      // 导航虚拟按键栏
-      _NavBar(
-        onBack:   () => _sendKeyEvent(4),   // KEYCODE_BACK
-        onHome:   () => _sendKeyEvent(3),   // KEYCODE_HOME
-        onRecent: () => _sendKeyEvent(187), // KEYCODE_APP_SWITCH
-      ),
       Expanded(
         child: Container(
           color: Colors.black,
           child: frameView,
         ),
+      ),
+      // 导航虚拟按键栏（移到下方）
+      _NavBar(
+        onBack:   () => _sendKeyEvent(4),   // KEYCODE_BACK
+        onHome:   () => _sendKeyEvent(3),   // KEYCODE_HOME
+        onRecent: () => _sendKeyEvent(187), // KEYCODE_APP_SWITCH
+        onMenu:   () => _sendKeyEvent(82),  // KEYCODE_MENU
       ),
     ]);
 
@@ -640,7 +651,8 @@ class _NavBar extends StatelessWidget {
   final VoidCallback onBack;
   final VoidCallback onHome;
   final VoidCallback onRecent;
-  const _NavBar({required this.onBack, required this.onHome, required this.onRecent});
+  final VoidCallback onMenu;
+  const _NavBar({required this.onBack, required this.onHome, required this.onRecent, required this.onMenu});
 
   @override
   Widget build(BuildContext context) {
@@ -650,6 +662,7 @@ class _NavBar extends StatelessWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
+          _NavBtn(icon: Icons.menu_rounded,         onTap: onMenu,   tooltip: '菜单'),
           _NavBtn(icon: Icons.arrow_back_rounded,   onTap: onBack,   tooltip: '返回'),
           _NavBtn(icon: Icons.circle_outlined,      onTap: onHome,   tooltip: '主页'),
           _NavBtn(icon: Icons.crop_square_rounded,  onTap: onRecent, tooltip: '最近任务'),
