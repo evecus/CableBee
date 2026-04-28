@@ -77,7 +77,12 @@ class ScrcpySession(
         // 2. adb forward
         onEvent("status", mapOf("msg" to "建立隧道..."))
         adbRun(adbExec, "-s", serial, "forward", "--remove", "tcp:$SCRCPY_PORT")
-        adbRun(adbExec, "-s", serial, "forward", "tcp:$SCRCPY_PORT", DEVICE_SOCKET)
+        val fwdResult = adbRunWithOutput(adbExec, "-s", serial, "forward", "tcp:$SCRCPY_PORT", DEVICE_SOCKET)
+        Log.i(TAG, "forward result: '$fwdResult'")
+        if (fwdResult.contains("error", ignoreCase = true) || fwdResult.isBlank()) {
+            Log.w(TAG, "forward may have failed, continuing anyway...")
+        }
+        onEvent("status", mapOf("msg" to "隧道: $fwdResult"))
 
         // 3. 启动 server
         onEvent("status", mapOf("msg" to "启动 server..."))
@@ -327,6 +332,13 @@ class ScrcpySession(
         p.waitFor()
         out
     } catch (_: Exception) { "" }
+
+    private fun adbRunWithOutput(vararg args: String): String = try {
+        val p = ProcessBuilder(*args).redirectErrorStream(true).start()
+        val out = p.inputStream.bufferedReader().readText()
+        p.waitFor()
+        out.trim()
+    } catch (e: Exception) { "exception: ${e.message}" }
 
     private fun adbRun(vararg args: String) = try {
         ProcessBuilder(*args).redirectErrorStream(true).start().waitFor()
