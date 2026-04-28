@@ -122,39 +122,52 @@ class RemoteScreenState extends State<RemoteScreen>
     _eventSub = _kEvents.receiveBroadcastStream().listen(_onEvent);
 
     try {
+      // [诊断] 检查 serial
+      if (serial.isEmpty) throw Exception('[诊断] 未选中设备，serial 为空');
+      setState(() => _statusMsg = '[1/4] serial=$serial');
+      await Future.delayed(const Duration(milliseconds: 400));
+
       // 1. 推送 scrcpy server
-      setState(() => _statusMsg = '正在推送 server...');
+      setState(() => _statusMsg = '[2/4] 正在推送 server...');
       const serverAsset = 'assets/scrcpy-server';
       const remotePath  = '/data/local/tmp/scrcpy_server.apk';
       final pushRes = await adb.pushAsset(serverAsset, remotePath);
-      if (pushRes.exitCode != 0) throw Exception('推送失败: ${pushRes.stderr}');
+      if (pushRes.exitCode != 0) throw Exception('[诊断] 推送失败(${pushRes.exitCode}): ${pushRes.stderr}');
+      setState(() => _statusMsg = '[2/4] server 推送完成 ✓');
+      await Future.delayed(const Duration(milliseconds: 300));
 
       // 2. 启动 server
-      setState(() => _statusMsg = '启动 server...');
+      setState(() => _statusMsg = '[3/4] 启动 server...');
       const serverCmd =
           'CLASSPATH=/data/local/tmp/scrcpy_server.apk '
           'app_process ./ com.genymobile.scrcpy.Server '
           '1.18 verbose 0 8000000 30 -1 true - true true 0 false false - - false';
       // 后台启动，不等待返回
       adb.shell(serverCmd, timeoutMs: 100).catchError((_) {});
-      await Future.delayed(const Duration(milliseconds: 1000));
+      await Future.delayed(const Duration(milliseconds: 1500));
+      setState(() => _statusMsg = '[3/4] server 已启动，等待就绪...');
 
       // 3. adb forward
-      setState(() => _statusMsg = '建立隧道...');
-      await _kAdb.invokeMethod('forward', {
+      setState(() => _statusMsg = '[4/4] 建立隧道...');
+      final fwdResult = await _kAdb.invokeMethod('forward', {
         'serial': serial,
         'local':  'tcp:5005',
         'remote': 'localabstract:scrcpy',
       });
+      setState(() => _statusMsg = '[4/4] 隧道建立完成 fwd=$fwdResult ✓');
+      await Future.delayed(const Duration(milliseconds: 300));
 
       // 4. 通知 Kotlin 侧开始连接 socket，等待 connected 事件后返回 textureId
-      setState(() => _statusMsg = '正在连接设备...');
+      setState(() => _statusMsg = '正在连接设备（等待握手，最多15秒）...');
       final textureId = await _kMethod.invokeMethod<int>('start', {
         'serial':  serial,
         'maxSize': _maxSize,
         'bitRate': _bitRate * 1000000,
         'maxFps':  _maxFps,
-      });
+      }).timeout(
+        const Duration(seconds: 15),
+        onTimeout: () => throw Exception('[诊断] start 超时：socket 连不上，请检查 scrcpy server 是否正常启动'),
+      );
 
       setState(() {
         _textureId  = textureId;
@@ -171,7 +184,7 @@ class RemoteScreenState extends State<RemoteScreen>
     } catch (e) {
       setState(() {
         _connecting = false;
-        _statusMsg  = '✗ 连接失败：$e';
+        _statusMsg  = '✗ $e';
       });
     }
   }
