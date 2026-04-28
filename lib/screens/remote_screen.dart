@@ -16,6 +16,7 @@ import '../widgets/common.dart';
 
 const _kMethod = MethodChannel('com.cablebee.assistant/scrcpy');
 const _kEvents = EventChannel('com.cablebee.assistant/scrcpy_events');
+const _kAdb    = MethodChannel('com.cablebee/adb');
 
 // ── Android keycode 常量 ────────────────────────────────────────────────────
 const _kKeyBack   = 4;
@@ -140,7 +141,7 @@ class RemoteScreenState extends State<RemoteScreen>
 
       // 3. adb forward
       setState(() => _statusMsg = '建立隧道...');
-      await _kMethod.invokeMethod('forward', {
+      await _kAdb.invokeMethod('forward', {
         'serial': serial,
         'local':  'tcp:5005',
         'remote': 'localabstract:scrcpy',
