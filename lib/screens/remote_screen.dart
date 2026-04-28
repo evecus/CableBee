@@ -121,6 +121,32 @@ class RemoteScreenState extends State<RemoteScreen>
     _eventSub = _kEvents.receiveBroadcastStream().listen(_onEvent);
 
     try {
+      // 1. 推送 scrcpy server
+      setState(() => _statusMsg = '正在推送 server...');
+      const serverAsset = 'assets/scrcpy-server';
+      const remotePath  = '/data/local/tmp/scrcpy_server.apk';
+      final pushRes = await adb.pushAsset(serverAsset, remotePath);
+      if (pushRes.exitCode != 0) throw Exception('推送失败: ${pushRes.stderr}');
+
+      // 2. 启动 server
+      setState(() => _statusMsg = '启动 server...');
+      const serverCmd =
+          'CLASSPATH=/data/local/tmp/scrcpy_server.apk '
+          'app_process ./ com.genymobile.scrcpy.Server '
+          '1.18 verbose 0 8000000 30 -1 true - true true 0 false false - - false';
+      // 后台启动，不等待返回
+      adb.shell(serverCmd, timeoutMs: 100).catchError((_) {});
+      await Future.delayed(const Duration(milliseconds: 1000));
+
+      // 3. adb forward
+      setState(() => _statusMsg = '建立隧道...');
+      await _kMethod.invokeMethod('forward', {
+        'serial': serial,
+        'local':  'tcp:5005',
+        'remote': 'localabstract:scrcpy',
+      });
+
+      // 4. 通知 Kotlin 侧开始连接 socket
       final textureId = await _kMethod.invokeMethod<int>('start', {
         'serial':  serial,
         'maxSize': _maxSize,
@@ -139,6 +165,11 @@ class RemoteScreenState extends State<RemoteScreen>
       setState(() {
         _connecting = false;
         _statusMsg  = '✗ 连接失败：${e.message}';
+      });
+    } catch (e) {
+      setState(() {
+        _connecting = false;
+        _statusMsg  = '✗ 连接失败：$e';
       });
     }
   }
