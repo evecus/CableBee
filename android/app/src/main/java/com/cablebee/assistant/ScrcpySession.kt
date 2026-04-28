@@ -79,9 +79,9 @@ class ScrcpySession(
         adbRun(adbExec, "-s", serial, "forward", "--remove", "tcp:$SCRCPY_PORT")
         adbRun(adbExec, "-s", serial, "forward", "tcp:$SCRCPY_PORT", DEVICE_SOCKET)
 
-        // 3. 启动 server（甲壳虫方式：无版本号无参数）
+        // 3. 启动 server
         onEvent("status", mapOf("msg" to "启动 server..."))
-        startServer(adbExec, serial, serverPath)
+        startServer(adbExec, serial, serverPath, maxSize, bitRate, maxFps)
         Thread.sleep(800)
 
         // 4. 连接 video socket
@@ -165,11 +165,30 @@ class ScrcpySession(
         throw IOException("无法推送 scrcpy server 到设备")
     }
 
-    private fun startServer(adbExec: String, serial: String, serverPath: String) {
-        // 甲壳虫方式：无版本号，无额外参数
+    private fun startServer(adbExec: String, serial: String, serverPath: String,
+                            maxSize: Int, bitRate: Int, maxFps: Int) {
         val androidData = if (serverPath.startsWith("/sdcard")) "ANDROID_DATA=/sdcard " else ""
-        val cmd = "${androidData}CLASSPATH=$serverPath app_process ./ com.genymobile.scrcpy.Server"
-        Log.i(TAG, "startServer cmd: $cmd")
+        // scrcpy 1.18: 版本号单独传，createOptions 收16个参数
+        // 实测：版本号后跟15个参数（无clipboardAutosync）
+        val params = listOf(
+            "verbose",        // 0: logLevel
+            "$maxSize",       // 1: maxSize (0=不限)
+            "$bitRate",       // 2: bitRate
+            "$maxFps",        // 3: maxFps
+            "-1",             // 4: lockedVideoOrientation
+            "true",           // 5: tunnelForward
+            "-",              // 6: crop
+            "true",           // 7: sendFrameMeta
+            "true",           // 8: control
+            "0",              // 9: displayId
+            "false",          // 10: showTouches
+            "false",          // 11: stayAwake
+            "-",              // 12: codecOptions
+            "-",              // 13: encoderName
+            "false",          // 14: powerOffScreenOnClose
+        ).joinToString(" ")
+        val cmd = "${androidData}CLASSPATH=$serverPath app_process ./ com.genymobile.scrcpy.Server 1.18 $params"
+        Log.i(TAG, "startServer: $cmd")
 
         Thread {
             try {
