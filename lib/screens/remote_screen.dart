@@ -147,7 +147,8 @@ class RemoteScreenState extends State<RemoteScreen>
         'remote': 'localabstract:scrcpy',
       });
 
-      // 4. 通知 Kotlin 侧开始连接 socket
+      // 4. 通知 Kotlin 侧开始连接 socket，等待 connected 事件后返回 textureId
+      setState(() => _statusMsg = '正在连接设备...');
       final textureId = await _kMethod.invokeMethod<int>('start', {
         'serial':  serial,
         'maxSize': _maxSize,
