@@ -25,9 +25,7 @@ import kotlinx.coroutines.CoroutineScope
  *     { type: "stopped" }
  */
 class ScrcpyChannel(
-    private val adbExec: String,           // adb 二进制路径
     private val textureRegistry: TextureRegistry,
-    private val serverBytes: ByteArray,    // scrcpy-server.jar 字节
     private val scope: CoroutineScope,
 ) {
     companion object {
@@ -60,22 +58,13 @@ class ScrcpyChannel(
                 textureEntry = entry
                 val textureId = entry.id()
 
-                // 先把 textureId 返回给 Flutter，Flutter 立即创建 Texture widget
+                // 先把 textureId 返回给 Flutter
                 result.success(textureId)
 
-                // 然后在后台启动会话
+                // Flutter 侧已完成 push/forward/server 启动，直接连接
                 session = ScrcpySession(entry) { type, data ->
                     sendEvent(mapOf("type" to type) + data)
-                }.also {
-                    it.start(
-                        adbExec     = adbExec,
-                        serial      = serial,
-                        maxSize     = maxSize,
-                        bitRate     = bitRate,
-                        maxFps      = maxFps,
-                        serverBytes = serverBytes,
-                    )
-                }
+                }.also { it.connect() }
             }
 
             "stop" -> {
