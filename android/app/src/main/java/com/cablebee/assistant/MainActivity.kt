@@ -298,6 +298,21 @@ class MainActivity : FlutterActivity() {
                         }
                     }
 
+                    // forward(serial, local, remote) → String
+                    "forward" -> {
+                        val serial = call.argument<String>("serial") ?: return@setMethodCallHandler result.error("BAD_ARG","serial required",null)
+                        val local  = call.argument<String>("local")  ?: return@setMethodCallHandler result.error("BAD_ARG","local required",null)
+                        val remote = call.argument<String>("remote") ?: return@setMethodCallHandler result.error("BAD_ARG","remote required",null)
+                        scope.launch {
+                            adb("-s", serial, "forward", "--remove", local, timeoutMs = 5_000)
+                            val r = adb("-s", serial, "forward", local, remote, timeoutMs = 5_000)
+                            ui {
+                                if (r.exit == 0) result.success(r.output)
+                                else result.error("FORWARD_FAILED", r.output, null)
+                            }
+                        }
+                    }
+
                     else -> result.notImplemented()
                 }
             }
@@ -364,14 +379,8 @@ class MainActivity : FlutterActivity() {
             }
 
         // ── SCRCPY ────────────────────────────────────────────────────────────
-        val serverBytes = try {
-            assets.open("scrcpy-server").use { it.readBytes() }
-        } catch (_: Exception) { ByteArray(0) }
-
         scrcpyChannel = ScrcpyChannel(
-            adbExec         = adbBin.absolutePath,
             textureRegistry = flutterEngine.renderer,
-            serverBytes     = serverBytes,
             scope           = scope,
         )
 
