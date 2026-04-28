@@ -144,7 +144,7 @@ class RemoteScreenState extends State<RemoteScreen>
           '1.18 verbose 0 8000000 30 -1 true - true true 0 false false - - false';
       // 后台启动，不等待返回
       adb.shell(serverCmd, timeoutMs: 100).catchError((_) {});
-      await Future.delayed(const Duration(milliseconds: 1500));
+      await Future.delayed(const Duration(milliseconds: 2500));
       setState(() => _statusMsg = '[3/4] server 已启动，等待就绪...');
 
       // 3. adb forward
