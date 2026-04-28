@@ -12,18 +12,18 @@ import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
+/**
+ * ScrcpySession — 只负责 socket 连接 + MediaCodec 解码 + 控制发送
+ * push/forward/startServer 全部由 Flutter 侧通过 AdbService 完成
+ */
 class ScrcpySession(
     private val textureEntry: TextureRegistry.SurfaceTextureEntry,
     private val onEvent: (String, Map<String, Any?>) -> Unit,
 ) {
     companion object {
         private const val TAG = "ScrcpySession"
-        private const val SCRCPY_PORT    = 5005
-        private const val DEVICE_SOCKET  = "localabstract:scrcpy"
-        private const val SERVER_PATH    = "/data/local/tmp/scrcpy_server.apk"
-        private const val SERVER_PATH_SD = "/sdcard/adbhelper/scrcpy_server.apk"
+        private const val SCRCPY_PORT = 5005
 
-        // 控制消息类型
         const val TYPE_INJECT_KEYCODE = 0
         const val TYPE_INJECT_TOUCH   = 2
         const val TYPE_INJECT_SCROLL  = 3
@@ -42,77 +42,48 @@ class ScrcpySession(
     var deviceWidth:  Int = 0; private set
     var deviceHeight: Int = 0; private set
 
-    // ── 启动 ─────────────────────────────────────────────────────────────────
+    // ── 连接（push/forward/server 已由 Flutter 完成）─────────────────────────
 
-    fun start(
-        adbExec: String,
-        serial: String,
-        maxSize: Int = 1080,
-        bitRate: Int = 8_000_000,
-        maxFps: Int = 30,
-        serverBytes: ByteArray,
-    ) {
+    fun connect() {
         if (running) return
         running = true
         Thread {
-            try { _start(adbExec, serial, maxSize, bitRate, maxFps, serverBytes) }
+            try { _connect() }
             catch (e: Exception) {
-                Log.e(TAG, "Session failed", e)
-                onEvent("error", mapOf("message" to (e.message ?: "未知错误")))
+                Log.e(TAG, "connect failed", e)
+                onEvent("error", mapOf("message" to (e.message ?: "连接失败")))
                 stop()
             }
-        }.also { it.isDaemon = true; it.name = "scrcpy-start" }.start()
+        }.also { it.isDaemon = true; it.name = "scrcpy-connect" }.start()
     }
 
-    private fun _start(
-        adbExec: String, serial: String,
-        maxSize: Int, bitRate: Int, maxFps: Int,
-        serverBytes: ByteArray,
-    ) {
-        // 1. 推送 server
-        onEvent("status", mapOf("msg" to "正在推送 server..."))
-        val serverPath = pushServer(adbExec, serial, serverBytes)
-        Log.i(TAG, "server pushed to $serverPath")
-
-        // 2. adb forward
-        onEvent("status", mapOf("msg" to "建立隧道..."))
-        adbRun(adbExec, "-s", serial, "forward", "--remove", "tcp:$SCRCPY_PORT")
-        val fwdResult = adbRunWithOutput(adbExec, "-s", serial, "forward", "tcp:$SCRCPY_PORT", DEVICE_SOCKET)
-        Log.i(TAG, "forward result: '$fwdResult'")
-        if (fwdResult.contains("error", ignoreCase = true) || fwdResult.isBlank()) {
-            Log.w(TAG, "forward may have failed, continuing anyway...")
-        }
-        onEvent("status", mapOf("msg" to "隧道: $fwdResult"))
-
-        // 3. 启动 server
-        onEvent("status", mapOf("msg" to "启动 server..."))
-        startServer(adbExec, serial, serverPath, maxSize, bitRate, maxFps)
-        Thread.sleep(800)
-
-        // 4. 连接 video socket
+    private fun _connect() {
+        // 连接 video socket
         onEvent("status", mapOf("msg" to "连接中..."))
         var attempt = 0
-        while (attempt < 25 && running) {
+        while (attempt < 30 && running) {
             try {
                 videoSocket = Socket("127.0.0.1", SCRCPY_PORT)
                 break
             } catch (e: IOException) {
                 attempt++
                 Log.w(TAG, "connect attempt $attempt: ${e.message}")
-                onEvent("status", mapOf("msg" to "连接中... ($attempt/25)"))
+                onEvent("status", mapOf("msg" to "连接中... ($attempt/30)"))
                 Thread.sleep(300)
             }
         }
         val vSock = videoSocket
             ?: throw IOException("无法连接 scrcpy server，请检查设备 ADB 授权")
 
-        // 5. 连接 control socket
+        // 连接 control socket
         controlSocket = Socket("127.0.0.1", SCRCPY_PORT)
         controlOut = controlSocket!!.getOutputStream()
 
-        // 6. 读握手头：设备名(64B) + 宽(2B) + 高(2B)
+        // 读握手头：设备名(64B) + 宽(2B) + 高(2B)
         val videoIn = vSock.getInputStream()
         val header = videoIn.readExactly(68)
+        if (header.size < 68) throw IOException("握手数据不足：${header.size}/68")
+
         val deviceName = String(header, 0, 64).trimEnd('\u0000')
         deviceWidth  = ((header[64].toInt() and 0xFF) shl 8) or (header[65].toInt() and 0xFF)
         deviceHeight = ((header[66].toInt() and 0xFF) shl 8) or (header[67].toInt() and 0xFF)
@@ -124,93 +95,8 @@ class ScrcpySession(
             "deviceHeight" to deviceHeight,
         ))
 
-        // 7. 初始化解码器
         initDecoder()
-
-        // 8. 开始解码
         startDecode(videoIn)
-    }
-
-    // ── Server 管理 ──────────────────────────────────────────────────────────
-
-    private fun pushServer(adbExec: String, serial: String, bytes: ByteArray): String {
-        for (path in listOf(SERVER_PATH, SERVER_PATH_SD)) {
-            try {
-                // 先确保目录存在
-                if (path.contains("adbhelper")) {
-                    adbShell(adbExec, serial, "mkdir -p /sdcard/adbhelper 2>/dev/null")
-                }
-
-                val tmp = java.io.File.createTempFile("scrcpy_srv", ".apk")
-                tmp.writeBytes(bytes)
-
-                val proc = ProcessBuilder(adbExec, "-s", serial, "push",
-                    tmp.absolutePath, path)
-                    .redirectErrorStream(true).start()
-                val out = proc.inputStream.bufferedReader().readText()
-                proc.waitFor()
-                tmp.delete()
-
-                Log.d(TAG, "push to $path: $out")
-                if (out.contains("error", ignoreCase = true) ||
-                    out.contains("failed", ignoreCase = true)) continue
-
-                // 验证大小
-                val check = adbShell(adbExec, serial, "wc -c < $path 2>/dev/null")
-                val remoteSize = check.trim().toIntOrNull() ?: 0
-                if (remoteSize == bytes.size) {
-                    Log.i(TAG, "verified $path size=$remoteSize")
-                    return path
-                }
-                Log.w(TAG, "size mismatch: local=${bytes.size} remote=$remoteSize")
-            } catch (e: Exception) {
-                Log.w(TAG, "push to $path failed: ${e.message}")
-            }
-        }
-        throw IOException("无法推送 scrcpy server 到设备")
-    }
-
-    private fun startServer(adbExec: String, serial: String, serverPath: String,
-                            maxSize: Int, bitRate: Int, maxFps: Int) {
-        val androidData = if (serverPath.startsWith("/sdcard")) "ANDROID_DATA=/sdcard " else ""
-        // scrcpy 1.18: 版本号单独传，createOptions 收16个参数
-        // 实测：版本号后跟15个参数（无clipboardAutosync）
-        val params = listOf(
-            "verbose",        // 0: logLevel
-            "$maxSize",       // 1: maxSize (0=不限)
-            "$bitRate",       // 2: bitRate
-            "$maxFps",        // 3: maxFps
-            "-1",             // 4: lockedVideoOrientation
-            "true",           // 5: tunnelForward
-            "-",              // 6: crop
-            "true",           // 7: sendFrameMeta
-            "true",           // 8: control
-            "0",              // 9: displayId
-            "false",          // 10: showTouches
-            "false",          // 11: stayAwake
-            "-",              // 12: codecOptions
-            "-",              // 13: encoderName
-            "false",          // 14: powerOffScreenOnClose
-        ).joinToString(" ")
-        val cmd = "${androidData}CLASSPATH=$serverPath app_process ./ com.genymobile.scrcpy.Server 1.18 $params"
-        Log.i(TAG, "startServer: $cmd")
-
-        Thread {
-            try {
-                val proc = ProcessBuilder(adbExec, "-s", serial, "shell", cmd)
-                    .redirectErrorStream(true).start()
-                val output = proc.inputStream.bufferedReader().readText()
-                if (output.isNotBlank()) {
-                    Log.i(TAG, "server output: $output")
-                    if (output.contains("Exception", ignoreCase = true) ||
-                        output.contains("Error", ignoreCase = true)) {
-                        onEvent("error", mapOf("message" to "server启动失败:\n$output"))
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "startServer failed", e)
-            }
-        }.also { it.isDaemon = true }.start()
     }
 
     // ── MediaCodec 解码 ──────────────────────────────────────────────────────
@@ -219,7 +105,6 @@ class ScrcpySession(
         val st = textureEntry.surfaceTexture()
         st.setDefaultBufferSize(deviceWidth, deviceHeight)
         surface = Surface(st)
-
         codec = MediaCodec.createDecoderByType("video/avc").also { c ->
             val fmt = MediaFormat.createVideoFormat("video/avc", deviceWidth, deviceHeight)
             c.configure(fmt, surface, null, 0)
@@ -232,10 +117,8 @@ class ScrcpySession(
         decodeThread = Thread {
             val c = codec ?: return@Thread
             val timeoutUs = 10_000L
-
             try {
                 while (running) {
-                    // 每帧12字节元数据: PTS(8B) + 帧大小(4B)
                     val meta = videoIn.readExactly(12)
                     if (meta.size < 12) break
 
@@ -249,7 +132,6 @@ class ScrcpySession(
                     val frameData = videoIn.readExactly(frameSize)
                     if (frameData.size < frameSize) break
 
-                    // 喂给解码器
                     val inputIdx = c.dequeueInputBuffer(timeoutUs)
                     if (inputIdx >= 0) {
                         val buf = c.getInputBuffer(inputIdx) ?: continue
@@ -258,12 +140,9 @@ class ScrcpySession(
                         c.queueInputBuffer(inputIdx, 0, frameSize, pts, 0)
                     }
 
-                    // 渲染输出帧
                     val info = MediaCodec.BufferInfo()
                     val outputIdx = c.dequeueOutputBuffer(info, timeoutUs)
-                    if (outputIdx >= 0) {
-                        c.releaseOutputBuffer(outputIdx, true)
-                    }
+                    if (outputIdx >= 0) c.releaseOutputBuffer(outputIdx, true)
                 }
             } catch (e: Exception) {
                 if (running) Log.e(TAG, "decode error", e)
@@ -324,25 +203,6 @@ class ScrcpySession(
     }
 
     // ── 工具 ─────────────────────────────────────────────────────────────────
-
-    private fun adbShell(adbExec: String, serial: String, cmd: String): String = try {
-        val p = ProcessBuilder(adbExec, "-s", serial, "shell", cmd)
-            .redirectErrorStream(true).start()
-        val out = p.inputStream.bufferedReader().readText()
-        p.waitFor()
-        out
-    } catch (_: Exception) { "" }
-
-    private fun adbRunWithOutput(vararg args: String): String = try {
-        val p = ProcessBuilder(*args).redirectErrorStream(true).start()
-        val out = p.inputStream.bufferedReader().readText()
-        p.waitFor()
-        out.trim()
-    } catch (e: Exception) { "exception: ${e.message}" }
-
-    private fun adbRun(vararg args: String) = try {
-        ProcessBuilder(*args).redirectErrorStream(true).start().waitFor()
-    } catch (_: Exception) { 0 }
 
     private fun InputStream.readExactly(n: Int): ByteArray {
         val buf = ByteArray(n); var off = 0
