@@ -12,10 +12,6 @@ import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-/**
- * ScrcpySession — 只负责 socket 连接 + MediaCodec 解码 + 控制发送
- * push/forward/startServer 全部由 Flutter 侧通过 AdbService 完成
- */
 class ScrcpySession(
     private val textureEntry: TextureRegistry.SurfaceTextureEntry,
     private val onEvent: (String, Map<String, Any?>) -> Unit,
@@ -31,18 +27,16 @@ class ScrcpySession(
     }
 
     @Volatile private var running = false
+    @Volatile private var stopped = false  // stop() が呼ばれたか
 
     private var videoSocket:   Socket? = null
     private var controlSocket: Socket? = null
     private var controlOut:    OutputStream? = null
     private var codec:         MediaCodec? = null
     private var surface:       Surface? = null
-    private var decodeThread:  Thread? = null
 
     var deviceWidth:  Int = 0; private set
     var deviceHeight: Int = 0; private set
-
-    // ── 连接（push/forward/server 已由 Flutter 完成）─────────────────────────
 
     fun connect() {
         if (running) return
@@ -50,16 +44,19 @@ class ScrcpySession(
         Thread {
             try { _connect() }
             catch (e: Exception) {
-                Log.e(TAG, "connect failed", e)
-                onEvent("error", mapOf("message" to (e.message ?: "连接失败")))
-                stop()
+                if (!stopped) {
+                    Log.e(TAG, "connect failed", e)
+                    onEvent("error", mapOf("message" to (e.message ?: "连接失败")))
+                }
+                cleanup()
             }
         }.also { it.isDaemon = true; it.name = "scrcpy-connect" }.start()
     }
 
     private fun _connect() {
-        // 连接 video socket
         onEvent("status", mapOf("msg" to "连接中..."))
+
+        // ── 1. video socket 接続（リトライあり）──────────────────────────────
         var attempt = 0
         while (attempt < 30 && running) {
             try {
@@ -69,28 +66,28 @@ class ScrcpySession(
                 attempt++
                 Log.w(TAG, "connect attempt $attempt: ${e.message}")
                 onEvent("status", mapOf("msg" to "连接中... ($attempt/30)"))
-                Thread.sleep(300)
+                Thread.sleep(200)
             }
         }
-        val vSock = videoSocket
-            ?: throw IOException("无法连接 scrcpy server，请检查设备 ADB 授权")
+        val vSock = videoSocket ?: throw IOException("无法连接 scrcpy server")
 
-        // scrcpy 1.18 握手头：1字节dummy + 64字节设备名 + 2字节宽 + 2字节高 = 69字节
-        // 注意：必须先读完握手头，再建立 control socket
-        // 否则 control socket 会抢占 server 的第二个连接槽，导致 video 流 EOF
+        // ── 2. ハンドシェイク読み取り（69バイト: 1dummy + 64name + 2w + 2h）──
+        // control socket はハンドシェイク完了後に接続する（順序重要）
         val videoIn = vSock.getInputStream()
         val header = videoIn.readExactly(69)
         if (header.size < 69) throw IOException("握手数据不足：${header.size}/69")
 
-        // header[0] = dummy byte (skip)
         val deviceName = String(header, 1, 64).trimEnd('\u0000')
         deviceWidth  = ((header[65].toInt() and 0xFF) shl 8) or (header[66].toInt() and 0xFF)
         deviceHeight = ((header[67].toInt() and 0xFF) shl 8) or (header[68].toInt() and 0xFF)
-        Log.i(TAG, "connected: $deviceName ${deviceWidth}x${deviceHeight}")
+        Log.i(TAG, "handshake ok: $deviceName ${deviceWidth}x${deviceHeight}")
 
-        // ハンドシェイク完了後に control socket を接続する
+        if (!running) return
+
+        // ── 3. control socket 接続（ハンドシェイク後）───────────────────────
         controlSocket = Socket("127.0.0.1", SCRCPY_PORT)
         controlOut = controlSocket!!.getOutputStream()
+        Log.i(TAG, "control socket connected")
 
         onEvent("connected", mapOf(
             "deviceName"   to deviceName,
@@ -98,104 +95,100 @@ class ScrcpySession(
             "deviceHeight" to deviceHeight,
         ))
 
+        // ── 4. デコーダ初期化 ────────────────────────────────────────────────
         initDecoder()
-        startDecode(videoIn)
+
+        // ── 5. デコードループ（このスレッドで直接実行）──────────────────────
+        decode(videoIn)
     }
 
-    // ── MediaCodec 解码 ──────────────────────────────────────────────────────
-
     private fun initDecoder() {
-        // Surface を先に作り、その後 SurfaceTexture のバッファサイズを設定
         val st = textureEntry.surfaceTexture()
         st.setDefaultBufferSize(deviceWidth, deviceHeight)
         surface = Surface(st)
-
         codec = MediaCodec.createDecoderByType("video/avc").also { c ->
-            val fmt = MediaFormat.createVideoFormat("video/avc", deviceWidth, deviceHeight).also { f ->
-                // MediaCodec が必要とする最低限の hint を追加
-                // frame-rate は必須ではないが一部デバイスで required になることがある
-                f.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
-                // color format は surface output の場合は自動だが明示しておく
-                f.setInteger(
-                    MediaFormat.KEY_COLOR_FORMAT,
-                    android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
-                )
-            }
-            try {
-                c.configure(fmt, surface, null, 0)
-            } catch (e: IllegalArgumentException) {
-                // フォールバック: hint なしで再試行
-                Log.w(TAG, "configure with hints failed, retry without: ${e.message}")
-                val fmt2 = MediaFormat.createVideoFormat("video/avc", deviceWidth, deviceHeight)
-                c.configure(fmt2, surface, null, 0)
-            }
+            val fmt = MediaFormat.createVideoFormat("video/avc", deviceWidth, deviceHeight)
+            c.configure(fmt, surface, null, 0)
             c.start()
         }
         Log.i(TAG, "decoder ready ${deviceWidth}x${deviceHeight}")
     }
 
-    private fun startDecode(videoIn: InputStream) {
-        decodeThread = Thread {
-            val c = codec ?: return@Thread
-            val timeoutUs = 10_000L
-            // scrcpy NO_PTS = Long.MIN_VALUE，表示 SPS/PPS config 帧
-            val NO_PTS = Long.MIN_VALUE
+    private fun decode(videoIn: InputStream) {
+        val c = codec ?: return
+        val NO_PTS = Long.MIN_VALUE
+        val timeoutUs = 10_000L
 
-            try {
-                while (running) {
-                    // 每帧12字节元数据: PTS(8B long) + 帧大小(4B int)
-                    val meta = videoIn.readExactly(12)
-                    if (meta.size < 12) break
+        Log.i(TAG, "decode loop start")
+        try {
+            while (running) {
+                // 12バイトメタ: PTS(8B) + frameSize(4B)
+                val meta = videoIn.readExactly(12)
+                if (meta.size < 12) { Log.w(TAG, "meta EOF"); break }
 
-                    val pts = ByteBuffer.wrap(meta, 0, 8)
-                        .order(ByteOrder.BIG_ENDIAN).getLong()
-                    val frameSize = ByteBuffer.wrap(meta, 8, 4)
-                        .order(ByteOrder.BIG_ENDIAN).getInt() and 0x7FFFFFFF
+                val pts = ByteBuffer.wrap(meta, 0, 8).order(ByteOrder.BIG_ENDIAN).getLong()
+                val frameSize = ByteBuffer.wrap(meta, 8, 4).order(ByteOrder.BIG_ENDIAN).getInt() and 0x7FFFFFFF
 
-                    if (frameSize <= 0 || frameSize > 10_000_000) {
-                        Log.w(TAG, "invalid frameSize=$frameSize pts=$pts")
-                        continue
-                    }
-
-                    val frameData = videoIn.readExactly(frameSize)
-                    if (frameData.size < frameSize) break
-
-                    // 判断是否为 config 帧（SPS/PPS）
-                    val isConfig = (pts == NO_PTS)
-                    val flags = if (isConfig) MediaCodec.BUFFER_FLAG_CODEC_CONFIG else 0
-                    val presentationUs = if (isConfig) 0L else pts
-
-                    val inputIdx = c.dequeueInputBuffer(timeoutUs)
-                    if (inputIdx >= 0) {
-                        val buf = c.getInputBuffer(inputIdx) ?: continue
-                        buf.clear()
-                        buf.put(frameData, 0, frameSize)
-                        c.queueInputBuffer(inputIdx, 0, frameSize, presentationUs, flags)
-                    }
-
-                    // 无论是否 config 帧，都尝试消费输出队列
-                    // 避免 INFO_OUTPUT_FORMAT_CHANGED 事件堵塞后续帧
-                    val info = MediaCodec.BufferInfo()
-                    val outputIdx = c.dequeueOutputBuffer(info, if (isConfig) 0L else timeoutUs)
-                    when {
-                        outputIdx >= 0 -> {
-                            // render=true 仅对非 config 帧有意义
-                            c.releaseOutputBuffer(outputIdx, !isConfig)
-                        }
-                        outputIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                            Log.i(TAG, "output format changed: ${c.outputFormat}")
-                        }
-                        // INFO_TRY_AGAIN_LATER / INFO_OUTPUT_BUFFERS_CHANGED: 忽略
-                    }
+                if (frameSize <= 0 || frameSize > 10_000_000) {
+                    Log.w(TAG, "skip invalid frameSize=$frameSize")
+                    continue
                 }
-            } catch (e: Exception) {
-                if (running) Log.e(TAG, "decode error", e)
+
+                val frameData = videoIn.readExactly(frameSize)
+                if (frameData.size < frameSize) { Log.w(TAG, "frame EOF"); break }
+
+                val isConfig = (pts == NO_PTS)
+                val flags = if (isConfig) MediaCodec.BUFFER_FLAG_CODEC_CONFIG else 0
+                val presentationUs = if (isConfig) 0L else pts
+
+                val inputIdx = c.dequeueInputBuffer(timeoutUs)
+                if (inputIdx >= 0) {
+                    val buf = c.getInputBuffer(inputIdx) ?: continue
+                    buf.clear()
+                    buf.put(frameData, 0, frameSize)
+                    c.queueInputBuffer(inputIdx, 0, frameSize, presentationUs, flags)
+                }
+
+                // 出力キューを消費（FORMAT_CHANGED も処理）
+                val info = MediaCodec.BufferInfo()
+                var outIdx = c.dequeueOutputBuffer(info, if (isConfig) 0L else timeoutUs)
+                while (outIdx != MediaCodec.INFO_TRY_AGAIN_LATER) {
+                    when {
+                        outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ->
+                            Log.i(TAG, "format changed: ${c.outputFormat}")
+                        outIdx >= 0 ->
+                            c.releaseOutputBuffer(outIdx, true)
+                    }
+                    outIdx = c.dequeueOutputBuffer(info, 0)
+                }
             }
-            Log.i(TAG, "decode thread ended")
-        }.also { it.isDaemon = true; it.name = "scrcpy-decode"; it.start() }
+        } catch (e: Exception) {
+            if (running) Log.e(TAG, "decode error", e)
+        }
+        Log.i(TAG, "decode loop ended")
+        if (!stopped) onEvent("stopped", emptyMap())
+        cleanup()
     }
 
-    // ── 控制 ─────────────────────────────────────────────────────────────────
+    private fun cleanup() {
+        try { videoSocket?.close()   } catch (_: Exception) {}
+        try { controlSocket?.close() } catch (_: Exception) {}
+        try { codec?.stop(); codec?.release() } catch (_: Exception) {}
+        try { surface?.release()     } catch (_: Exception) {}
+        codec = null; surface = null
+        running = false
+    }
+
+    fun stop() {
+        stopped = true
+        running = false
+        try { videoSocket?.close()   } catch (_: Exception) {}
+        try { controlSocket?.close() } catch (_: Exception) {}
+        try { codec?.stop(); codec?.release() } catch (_: Exception) {}
+        try { surface?.release()     } catch (_: Exception) {}
+        codec = null; surface = null
+        onEvent("stopped", emptyMap())
+    }
 
     fun sendTouch(action: Int, pointerId: Long, x: Int, y: Int,
                   w: Int, h: Int, pressure: Float = 1f) {
@@ -207,16 +200,6 @@ class ScrcpySession(
         buf.putShort(w.toShort()); buf.putShort(h.toShort())
         buf.putShort((pressure * 65535).toInt().toShort())
         buf.putInt(if (action == 0) 1 else 0)
-        sendControl(buf.array())
-    }
-
-    fun sendScroll(x: Int, y: Int, w: Int, h: Int, hScroll: Int, vScroll: Int) {
-        val buf = ByteBuffer.allocate(21).order(ByteOrder.BIG_ENDIAN)
-        buf.put(TYPE_INJECT_SCROLL.toByte())
-        buf.putInt(x); buf.putInt(y)
-        buf.putShort(w.toShort()); buf.putShort(h.toShort())
-        buf.putInt(hScroll); buf.putInt(vScroll)
-        buf.put(0)
         sendControl(buf.array())
     }
 
@@ -233,20 +216,6 @@ class ScrcpySession(
     private fun sendControl(data: ByteArray) {
         try { controlOut?.write(data); controlOut?.flush() } catch (_: Exception) {}
     }
-
-    // ── 停止 ─────────────────────────────────────────────────────────────────
-
-    fun stop() {
-        running = false
-        try { videoSocket?.close()   } catch (_: Exception) {}
-        try { controlSocket?.close() } catch (_: Exception) {}
-        try { codec?.stop(); codec?.release() } catch (_: Exception) {}
-        try { surface?.release() } catch (_: Exception) {}
-        codec = null; surface = null
-        onEvent("stopped", emptyMap())
-    }
-
-    // ── 工具 ─────────────────────────────────────────────────────────────────
 
     private fun InputStream.readExactly(n: Int): ByteArray {
         val buf = ByteArray(n); var off = 0
