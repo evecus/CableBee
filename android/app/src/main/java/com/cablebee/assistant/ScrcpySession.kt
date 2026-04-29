@@ -79,15 +79,16 @@ class ScrcpySession(
         controlSocket = Socket("127.0.0.1", SCRCPY_PORT)
         controlOut = controlSocket!!.getOutputStream()
 
-        // scrcpy 1.18 握手头：64字节设备名 + 2字节宽(short) + 2字节高(short) = 68字节
-        // 注意：没有 dummy byte，直接从字节0开始读取设备名
+        // scrcpy 1.18 握手头：1字节dummy + 64字节设备名 + 2字节宽 + 2字节高 = 69字节
+        // ログ実証済み: width=1(0x00,0x01)になるのは68バイト読みの場合 → 69バイトが正しい
         val videoIn = vSock.getInputStream()
-        val header = videoIn.readExactly(68)
-        if (header.size < 68) throw IOException("握手数据不足：${header.size}/68")
+        val header = videoIn.readExactly(69)
+        if (header.size < 69) throw IOException("握手数据不足：\${header.size}/69")
 
-        val deviceName = String(header, 0, 64).trimEnd('\u0000')
-        deviceWidth  = ((header[64].toInt() and 0xFF) shl 8) or (header[65].toInt() and 0xFF)
-        deviceHeight = ((header[66].toInt() and 0xFF) shl 8) or (header[67].toInt() and 0xFF)
+        // header[0] = dummy byte (skip)
+        val deviceName = String(header, 1, 64).trimEnd('\u0000')
+        deviceWidth  = ((header[65].toInt() and 0xFF) shl 8) or (header[66].toInt() and 0xFF)
+        deviceHeight = ((header[67].toInt() and 0xFF) shl 8) or (header[68].toInt() and 0xFF)
         Log.i(TAG, "connected: $deviceName ${deviceWidth}x${deviceHeight}")
 
         onEvent("connected", mapOf(
@@ -103,12 +104,30 @@ class ScrcpySession(
     // ── MediaCodec 解码 ──────────────────────────────────────────────────────
 
     private fun initDecoder() {
+        // Surface を先に作り、その後 SurfaceTexture のバッファサイズを設定
         val st = textureEntry.surfaceTexture()
         st.setDefaultBufferSize(deviceWidth, deviceHeight)
         surface = Surface(st)
+
         codec = MediaCodec.createDecoderByType("video/avc").also { c ->
-            val fmt = MediaFormat.createVideoFormat("video/avc", deviceWidth, deviceHeight)
-            c.configure(fmt, surface, null, 0)
+            val fmt = MediaFormat.createVideoFormat("video/avc", deviceWidth, deviceHeight).also { f ->
+                // MediaCodec が必要とする最低限の hint を追加
+                // frame-rate は必須ではないが一部デバイスで required になることがある
+                f.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
+                // color format は surface output の場合は自動だが明示しておく
+                f.setInteger(
+                    MediaFormat.KEY_COLOR_FORMAT,
+                    android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
+                )
+            }
+            try {
+                c.configure(fmt, surface, null, 0)
+            } catch (e: IllegalArgumentException) {
+                // フォールバック: hint なしで再試行
+                Log.w(TAG, "configure with hints failed, retry without: ${e.message}")
+                val fmt2 = MediaFormat.createVideoFormat("video/avc", deviceWidth, deviceHeight)
+                c.configure(fmt2, surface, null, 0)
+            }
             c.start()
         }
         Log.i(TAG, "decoder ready ${deviceWidth}x${deviceHeight}")
