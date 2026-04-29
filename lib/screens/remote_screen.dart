@@ -131,9 +131,11 @@ class RemoteScreenState extends State<RemoteScreen>
 
       // 2. 启动 server
       setState(() => _statusMsg = '启动 server...');
-      final maxSizeArg = _maxSize == 0 ? '0' : '$_maxSize';
-      // 必须用单个字符串（不能隐式拼接），否则 Dart 不做变量插值
-      final serverCmd = 'CLASSPATH=/data/local/tmp/scrcpy_server.apk app_process ./ com.genymobile.scrcpy.Server 1.18 info $maxSizeArg ${_bitRate * 1000000} $_maxFps -1 true - true true 0 false false - - false > /dev/null 2>&1 &';
+      const serverCmd =
+          'CLASSPATH=/data/local/tmp/scrcpy_server.apk '
+          'app_process ./ com.genymobile.scrcpy.Server '
+          '1.18 verbose 0 8000000 30 -1 true - true true 0 false false - - false '
+          '> /dev/null 2>&1 &';
       await adb.shell(serverCmd, timeoutMs: 3000).catchError((_) {});
 
       // 等待 server socket 出现（最多5秒）
