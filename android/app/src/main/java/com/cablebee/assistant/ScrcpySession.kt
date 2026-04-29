@@ -75,21 +75,22 @@ class ScrcpySession(
         val vSock = videoSocket
             ?: throw IOException("无法连接 scrcpy server，请检查设备 ADB 授权")
 
-        // 连接 control socket
-        controlSocket = Socket("127.0.0.1", SCRCPY_PORT)
-        controlOut = controlSocket!!.getOutputStream()
-
         // scrcpy 1.18 握手头：1字节dummy + 64字节设备名 + 2字节宽 + 2字节高 = 69字节
-        // ログ実証済み: width=1(0x00,0x01)になるのは68バイト読みの場合 → 69バイトが正しい
+        // 注意：必须先读完握手头，再建立 control socket
+        // 否则 control socket 会抢占 server 的第二个连接槽，导致 video 流 EOF
         val videoIn = vSock.getInputStream()
         val header = videoIn.readExactly(69)
-        if (header.size < 69) throw IOException("握手数据不足：\${header.size}/69")
+        if (header.size < 69) throw IOException("握手数据不足：${header.size}/69")
 
         // header[0] = dummy byte (skip)
         val deviceName = String(header, 1, 64).trimEnd('\u0000')
         deviceWidth  = ((header[65].toInt() and 0xFF) shl 8) or (header[66].toInt() and 0xFF)
         deviceHeight = ((header[67].toInt() and 0xFF) shl 8) or (header[68].toInt() and 0xFF)
         Log.i(TAG, "connected: $deviceName ${deviceWidth}x${deviceHeight}")
+
+        // ハンドシェイク完了後に control socket を接続する
+        controlSocket = Socket("127.0.0.1", SCRCPY_PORT)
+        controlOut = controlSocket!!.getOutputStream()
 
         onEvent("connected", mapOf(
             "deviceName"   to deviceName,
