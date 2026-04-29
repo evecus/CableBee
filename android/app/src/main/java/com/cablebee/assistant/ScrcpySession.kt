@@ -211,7 +211,17 @@ class ScrcpySession(
         sendControl(buf.array())
     }
 
-    fun sendBackOrScreenOn() = sendControl(byteArrayOf(TYPE_BACK_OR_SCREEN.toByte()))
+    fun sendScroll(x: Int, y: Int, w: Int, h: Int, hScroll: Int, vScroll: Int) {
+        val buf = ByteBuffer.allocate(21).order(ByteOrder.BIG_ENDIAN)
+        buf.put(TYPE_INJECT_SCROLL.toByte())
+        buf.putInt(x); buf.putInt(y)
+        buf.putShort(w.toShort()); buf.putShort(h.toShort())
+        buf.putInt(hScroll); buf.putInt(vScroll)
+        buf.put(0)
+        sendControl(buf.array())
+    }
+
+        fun sendBackOrScreenOn() = sendControl(byteArrayOf(TYPE_BACK_OR_SCREEN.toByte()))
 
     private fun sendControl(data: ByteArray) {
         try { controlOut?.write(data); controlOut?.flush() } catch (_: Exception) {}
