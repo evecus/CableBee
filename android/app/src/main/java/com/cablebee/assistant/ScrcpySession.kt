@@ -79,20 +79,20 @@ class ScrcpySession(
         controlSocket = Socket("127.0.0.1", SCRCPY_PORT)
         controlOut = controlSocket!!.getOutputStream()
 
-        // scrcpy 1.18 握手头：设备名(64B) + 宽(4B int) + 高(4B int) = 72字节
+        // 先读64字节设备名
         val videoIn = vSock.getInputStream()
-        val header = videoIn.readExactly(72)
-        if (header.size < 72) throw IOException("握手数据不足：${header.size}/72")
+        val nameBuf = videoIn.readExactly(64)
+        if (nameBuf.size < 64) throw IOException("设备名数据不足：${nameBuf.size}/64")
+        val deviceName = String(nameBuf, 0, 64).trimEnd('\u0000')
 
-        Log.d(TAG, "header bytes[64..71]: " +
-            "${header[64].toInt() and 0xFF} ${header[65].toInt() and 0xFF} " +
-            "${header[66].toInt() and 0xFF} ${header[67].toInt() and 0xFF} " +
-            "${header[68].toInt() and 0xFF} ${header[69].toInt() and 0xFF} " +
-            "${header[70].toInt() and 0xFF} ${header[71].toInt() and 0xFF}")
+        // 读剩余字节，尝试不同格式
+        // 读5字节（够2+2+1或4+1）
+        val rest = videoIn.readExactly(5)
+        Log.d(TAG, "rest bytes: ${rest.map { it.toInt() and 0xFF }}")
 
-        val deviceName = String(header, 0, 64).trimEnd('\u0000')
-        deviceWidth  = ByteBuffer.wrap(header, 64, 4).order(ByteOrder.BIG_ENDIAN).getInt()
-        deviceHeight = ByteBuffer.wrap(header, 68, 4).order(ByteOrder.BIG_ENDIAN).getInt()
+        // 尝试 short+short（scrcpy 1.x早期格式）
+        deviceWidth  = ((rest[0].toInt() and 0xFF) shl 8) or (rest[1].toInt() and 0xFF)
+        deviceHeight = ((rest[2].toInt() and 0xFF) shl 8) or (rest[3].toInt() and 0xFF)
         Log.i(TAG, "connected: $deviceName ${deviceWidth}x${deviceHeight}")
 
         onEvent("connected", mapOf(
