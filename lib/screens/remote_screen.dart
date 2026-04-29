@@ -134,10 +134,10 @@ class RemoteScreenState extends State<RemoteScreen>
       const serverCmd =
           'CLASSPATH=/data/local/tmp/scrcpy_server.apk '
           'app_process ./ com.genymobile.scrcpy.Server '
-          '1.18 verbose 0 8000000 30 -1 true - true true 0 false false - - false';
-      // 后台启动，不等待返回
-      adb.shell(serverCmd, timeoutMs: 100).catchError((_) {});
-      await Future.delayed(const Duration(milliseconds: 1000));
+          '1.18 verbose 0 8000000 30 -1 true - true true 0 false false - - false '
+          '> /dev/null 2>&1 &';
+      await adb.shell(serverCmd, timeoutMs: 3000).catchError((_) {});
+      await Future.delayed(const Duration(milliseconds: 1500));
 
       // 3. adb forward
       setState(() => _statusMsg = '建立隧道...');
