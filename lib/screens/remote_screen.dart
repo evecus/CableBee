@@ -137,7 +137,22 @@ class RemoteScreenState extends State<RemoteScreen>
           '1.18 verbose 0 8000000 30 -1 true - true true 0 false false - - false '
           '> /dev/null 2>&1 &';
       await adb.shell(serverCmd, timeoutMs: 3000).catchError((_) {});
-      await Future.delayed(const Duration(milliseconds: 1500));
+
+      // 等待 server socket 出现（最多5秒）
+      setState(() => _statusMsg = '等待 server 就绪...');
+      bool socketReady = false;
+      for (int i = 0; i < 25; i++) {
+        await Future.delayed(const Duration(milliseconds: 200));
+        final check = await adb.shell(
+          'cat /proc/net/unix | grep -c scrcpy 2>/dev/null || echo 0',
+          timeoutMs: 2000,
+        );
+        if ((int.tryParse(check.stdout.trim()) ?? 0) > 0) {
+          socketReady = true;
+          break;
+        }
+      }
+      if (!socketReady) throw Exception('server 启动超时，socket 未就绪');
 
       // 3. adb forward
       setState(() => _statusMsg = '建立隧道...');
