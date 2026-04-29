@@ -118,8 +118,12 @@ class ScrcpySession(
         decodeThread = Thread {
             val c = codec ?: return@Thread
             val timeoutUs = 10_000L
+            // scrcpy NO_PTS = Long.MIN_VALUE，表示 SPS/PPS config 帧
+            val NO_PTS = Long.MIN_VALUE
+
             try {
                 while (running) {
+                    // 每帧12字节元数据: PTS(8B long) + 帧大小(4B int)
                     val meta = videoIn.readExactly(12)
                     if (meta.size < 12) break
 
@@ -128,22 +132,33 @@ class ScrcpySession(
                     val frameSize = ByteBuffer.wrap(meta, 8, 4)
                         .order(ByteOrder.BIG_ENDIAN).getInt() and 0x7FFFFFFF
 
-                    if (frameSize <= 0 || frameSize > 10_000_000) continue
+                    if (frameSize <= 0 || frameSize > 10_000_000) {
+                        Log.w(TAG, "invalid frameSize=$frameSize pts=$pts")
+                        continue
+                    }
 
                     val frameData = videoIn.readExactly(frameSize)
                     if (frameData.size < frameSize) break
+
+                    // 判断是否为 config 帧（SPS/PPS）
+                    val isConfig = (pts == NO_PTS)
+                    val flags = if (isConfig) MediaCodec.BUFFER_FLAG_CODEC_CONFIG else 0
+                    val presentationUs = if (isConfig) 0L else pts
 
                     val inputIdx = c.dequeueInputBuffer(timeoutUs)
                     if (inputIdx >= 0) {
                         val buf = c.getInputBuffer(inputIdx) ?: continue
                         buf.clear()
                         buf.put(frameData, 0, frameSize)
-                        c.queueInputBuffer(inputIdx, 0, frameSize, pts, 0)
+                        c.queueInputBuffer(inputIdx, 0, frameSize, presentationUs, flags)
                     }
 
-                    val info = MediaCodec.BufferInfo()
-                    val outputIdx = c.dequeueOutputBuffer(info, timeoutUs)
-                    if (outputIdx >= 0) c.releaseOutputBuffer(outputIdx, true)
+                    // config 帧不渲染，普通帧渲染到 Surface
+                    if (!isConfig) {
+                        val info = MediaCodec.BufferInfo()
+                        val outputIdx = c.dequeueOutputBuffer(info, timeoutUs)
+                        if (outputIdx >= 0) c.releaseOutputBuffer(outputIdx, true)
+                    }
                 }
             } catch (e: Exception) {
                 if (running) Log.e(TAG, "decode error", e)
