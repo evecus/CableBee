@@ -79,15 +79,15 @@ class ScrcpySession(
         controlSocket = Socket("127.0.0.1", SCRCPY_PORT)
         controlOut = controlSocket!!.getOutputStream()
 
-        // scrcpy 1.18 握手头：1字节dummy + 64字节设备名 + 2字节宽(short) + 2字节高(short) = 69字节
+        // scrcpy 1.18 握手头：64字节设备名 + 2字节宽(short) + 2字节高(short) = 68字节
+        // 注意：没有 dummy byte，直接从字节0开始读取设备名
         val videoIn = vSock.getInputStream()
-        val header = videoIn.readExactly(69)
-        if (header.size < 69) throw IOException("握手数据不足：${header.size}/69")
+        val header = videoIn.readExactly(68)
+        if (header.size < 68) throw IOException("握手数据不足：${header.size}/68")
 
-        // 跳过第0字节（dummy byte）
-        val deviceName = String(header, 1, 64).trimEnd('\u0000')
-        deviceWidth  = ((header[65].toInt() and 0xFF) shl 8) or (header[66].toInt() and 0xFF)
-        deviceHeight = ((header[67].toInt() and 0xFF) shl 8) or (header[68].toInt() and 0xFF)
+        val deviceName = String(header, 0, 64).trimEnd('\u0000')
+        deviceWidth  = ((header[64].toInt() and 0xFF) shl 8) or (header[65].toInt() and 0xFF)
+        deviceHeight = ((header[66].toInt() and 0xFF) shl 8) or (header[67].toInt() and 0xFF)
         Log.i(TAG, "connected: $deviceName ${deviceWidth}x${deviceHeight}")
 
         onEvent("connected", mapOf(
@@ -153,11 +153,19 @@ class ScrcpySession(
                         c.queueInputBuffer(inputIdx, 0, frameSize, presentationUs, flags)
                     }
 
-                    // config 帧不渲染，普通帧渲染到 Surface
-                    if (!isConfig) {
-                        val info = MediaCodec.BufferInfo()
-                        val outputIdx = c.dequeueOutputBuffer(info, timeoutUs)
-                        if (outputIdx >= 0) c.releaseOutputBuffer(outputIdx, true)
+                    // 无论是否 config 帧，都尝试消费输出队列
+                    // 避免 INFO_OUTPUT_FORMAT_CHANGED 事件堵塞后续帧
+                    val info = MediaCodec.BufferInfo()
+                    val outputIdx = c.dequeueOutputBuffer(info, if (isConfig) 0L else timeoutUs)
+                    when {
+                        outputIdx >= 0 -> {
+                            // render=true 仅对非 config 帧有意义
+                            c.releaseOutputBuffer(outputIdx, !isConfig)
+                        }
+                        outputIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                            Log.i(TAG, "output format changed: ${c.outputFormat}")
+                        }
+                        // INFO_TRY_AGAIN_LATER / INFO_OUTPUT_BUFFERS_CHANGED: 忽略
                     }
                 }
             } catch (e: Exception) {
