@@ -58,25 +58,11 @@ class ScrcpyChannel(
                 textureEntry = entry
                 val textureId = entry.id()
 
-                // 等 connected / error 事件后再返回 textureId，避免 Flutter 提前退出
-                var resultSent = false
+                // 先把 textureId 返回给 Flutter
+                result.success(textureId)
+
+                // Flutter 侧已完成 push/forward/server 启动，直接连接
                 session = ScrcpySession(entry) { type, data ->
-                    if (!resultSent) {
-                        when (type) {
-                            "connected" -> {
-                                resultSent = true
-                                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                                    result.success(textureId)
-                                }
-                            }
-                            "error" -> {
-                                resultSent = true
-                                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                                    result.error("SCRCPY_ERROR", data["message"] as? String ?: "连接失败", null)
-                                }
-                            }
-                        }
-                    }
                     sendEvent(mapOf("type" to type) + data)
                 }.also { it.connect() }
             }
