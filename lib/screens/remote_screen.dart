@@ -341,12 +341,7 @@ class RemoteScreenState extends State<RemoteScreen>
 
   // 将渲染坐标换算为设备坐标
   Offset _toDev(Offset local, Size renderSize) {
-    // 设备横屏但渲染区域竖屏时旋转
-    if (_devW > _devH && renderSize.width < renderSize.height) {
-      final scaleX = _devH / renderSize.width;
-      final scaleY = _devW / renderSize.height;
-      return Offset(local.dy * scaleY, (_devH - local.dx * scaleX));
-    }
+    // 始终按当前渲染宽高比线性映射，保证横屏设备横屏显示、竖屏设备竖屏显示。
     final scaleX = _devW / renderSize.width;
     final scaleY = _devH / renderSize.height;
     return Offset(local.dx * scaleX, local.dy * scaleY);
@@ -500,7 +495,6 @@ class RemoteScreenState extends State<RemoteScreen>
 
   Widget _buildMirrorPage() {
     final tid = _textureId;
-    final devIsLandscape = _devW > _devH;
 
     Widget mirrorView = LayoutBuilder(builder: (ctx, constraints) {
       if (tid == null) {
@@ -544,10 +538,6 @@ class RemoteScreenState extends State<RemoteScreen>
         ),
       );
     });
-
-    if (devIsLandscape) {
-      mirrorView = RotatedBox(quarterTurns: 1, child: mirrorView);
-    }
 
     final body = Column(children: [
       Expanded(
