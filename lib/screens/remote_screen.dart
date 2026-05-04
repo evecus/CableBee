@@ -321,8 +321,6 @@ class RemoteScreenState extends State<RemoteScreen>
     }
   }
 
-    } catch (_) {}
-  }
 
   Future<void> _connectWithProfile({
     required int maxSize,
