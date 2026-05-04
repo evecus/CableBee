@@ -122,6 +122,13 @@ class RemoteScreenState extends State<RemoteScreen>
     _eventSub = _kEvents.receiveBroadcastStream().listen(_onEvent);
 
     try {
+      // 0. 根据设备分辨率自动调参（不是降级重试，而是连接前预设最佳档位）
+      setState(() => _statusMsg = '检测设备分辨率...');
+      final tuned = await _autoTuneByResolution(adb);
+      final tunedMaxSize = tuned.$1;
+      final tunedBitRateMbps = tuned.$2;
+      final tunedFps = tuned.$3;
+
       // 1. 推送 scrcpy server
       setState(() => _statusMsg = '正在推送 server...');
       const serverAsset = 'assets/scrcpy-server';
@@ -131,10 +138,11 @@ class RemoteScreenState extends State<RemoteScreen>
 
       // 2. 启动 server
       setState(() => _statusMsg = '启动 server...');
-      const serverCmd =
+      final serverCmd =
           'CLASSPATH=/data/local/tmp/scrcpy_server.apk '
           'app_process ./ com.genymobile.scrcpy.Server '
-          '1.18 verbose 0 8000000 30 -1 true - true true 0 false false - - false '
+          '1.18 verbose $tunedMaxSize ${tunedBitRateMbps * 1000000} $tunedFps '
+          '-1 true - true true 0 false false - - false '
           '> /dev/null 2>&1 &';
       await adb.shell(serverCmd, timeoutMs: 3000).catchError((_) {});
 
@@ -165,9 +173,9 @@ class RemoteScreenState extends State<RemoteScreen>
       // 4. 通知 Kotlin 侧开始连接 socket
       final textureId = await _kMethod.invokeMethod<int>('start', {
         'serial':  serial,
-        'maxSize': _maxSize,
-        'bitRate': _bitRate * 1000000,
-        'maxFps':  _maxFps,
+        'maxSize': tunedMaxSize,
+        'bitRate': tunedBitRateMbps * 1000000,
+        'maxFps':  tunedFps,
       });
 
       setState(() {
@@ -188,6 +196,27 @@ class RemoteScreenState extends State<RemoteScreen>
         _statusMsg  = '✗ 连接失败：$e';
       });
     }
+  }
+
+  /// 读取设备物理分辨率并自动选择更稳的投屏参数。
+  Future<(int, int, int)> _autoTuneByResolution(AdbService adb) async {
+    final res = await adb.shell('wm size 2>/dev/null || wm size');
+    final out = res.stdout;
+    final m = RegExp(r'Physical size:\s*(\d+)x(\d+)', caseSensitive: false).firstMatch(out)
+        ?? RegExp(r'(\d+)x(\d+)').firstMatch(out);
+    if (m == null) return (_maxSize, _bitRate, _maxFps);
+
+    final w = int.tryParse(m.group(1) ?? '') ?? 0;
+    final h = int.tryParse(m.group(2) ?? '') ?? 0;
+    if (w <= 0 || h <= 0) return (_maxSize, _bitRate, _maxFps);
+
+    final longEdge = w > h ? w : h;
+    // 档位策略：按长边自动匹配 maxSize / bitrate / fps
+    if (longEdge >= 3000) return (1440, 12, 30); // 2K+
+    if (longEdge >= 2200) return (1280, 10, 30); // 1080x2400 等高纵横比机型
+    if (longEdge >= 1920) return (1080, 8, 30);  // FHD
+    if (longEdge >= 1280) return (960, 6, 25);   // HD+
+    return (720, 4, 24);                         // 低分屏
   }
 
   void _onEvent(dynamic raw) {
