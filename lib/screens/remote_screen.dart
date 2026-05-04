@@ -158,6 +158,7 @@ class RemoteScreenState extends State<RemoteScreen>
       final serverCmd =
           'CLASSPATH=/data/local/tmp/scrcpy_server.apk '
           'app_process / com.genymobile.scrcpy.Server '
+          '3.3.4 '  // v3.x 第一个参数必须是版本号
           'tunnel_forward=true '
           'video=true '
           'audio=false '
