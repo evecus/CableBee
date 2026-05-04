@@ -56,6 +56,7 @@ class RemoteScreenState extends State<RemoteScreen>
 
   String? _statusMsg;
   StreamSubscription? _eventSub;
+  bool _retriedSafeProfile = false;
 
   // 配置
   int  _maxSize  = 1080;   // 最大边长
@@ -262,8 +263,14 @@ class RemoteScreenState extends State<RemoteScreen>
         });
         break;
       case 'error':
+        final msg = map['message'] as String? ?? '';
+        if (msg == 'NO_VIDEO_FRAME' && !_retriedSafeProfile) {
+          _retriedSafeProfile = true;
+          _connectWithProfile(maxSize: 720, bitRateMbps: 4, fps: 20);
+          return;
+        }
         setState(() {
-          _statusMsg  = '✗ ${map['message']}';
+          _statusMsg  = '✗ $msg';
           _connected  = false;
           _connecting = false;
           _textureId  = null;
@@ -282,6 +289,22 @@ class RemoteScreenState extends State<RemoteScreen>
         }
         break;
     }
+  }
+
+  Future<void> _connectWithProfile({
+    required int maxSize,
+    required int bitRateMbps,
+    required int fps,
+  }) async {
+    setState(() {
+      _maxSize = maxSize;
+      _bitRate = bitRateMbps;
+      _maxFps = fps;
+      _statusMsg = '检测到无视频帧，自动切换兼容档位重试...';
+    });
+    await _stopSession();
+    await Future.delayed(const Duration(milliseconds: 300));
+    await _connect();
   }
 
   Future<void> _stopSession() async {
