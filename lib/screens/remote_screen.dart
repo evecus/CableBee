@@ -17,7 +17,6 @@ import '../widgets/common.dart';
 const _kMethod = MethodChannel('com.cablebee.assistant/scrcpy');
 const _kEvents = EventChannel('com.cablebee.assistant/scrcpy_events');
 const _kAdb    = MethodChannel('com.cablebee/adb');
-const _kServerLogPath = '/data/local/tmp/scrcpy_server.log';
 
 // ── Android keycode 常量 ────────────────────────────────────────────────────
 const _kKeyBack   = 4;
@@ -155,8 +154,8 @@ class RemoteScreenState extends State<RemoteScreen>
       //   send_codec_meta=true  → 握手头中包含 codec_id + width + height（12 字节）
       //   cleanup=true          → server 退出时自动清理
       //   power_on=true         → 启动时亮屏
+      // 注意：不重定向日志到文件（部分设备 /data/local/tmp 无写权限）
       final serverCmd =
-          'rm -f $_kServerLogPath; '
           'CLASSPATH=/data/local/tmp/scrcpy_server.apk '
           'app_process / com.genymobile.scrcpy.Server '
           'tunnel_forward=true '
@@ -172,7 +171,7 @@ class RemoteScreenState extends State<RemoteScreen>
           'send_codec_meta=true '
           'cleanup=true '
           'power_on=true '
-          '> $_kServerLogPath 2>&1 &';
+          '>/dev/null 2>&1 &';
       await adb.shell(serverCmd, timeoutMs: 3000).catchError((_) {});
 
       // 等待 server socket 出现（最多5秒）
@@ -297,9 +296,6 @@ class RemoteScreenState extends State<RemoteScreen>
           _connectWithProfile(maxSize: 720, bitRateMbps: 4, fps: 20);
           return;
         }
-        if (msg == 'NO_VIDEO_FRAME') {
-          _readServerLogTail();
-        }
         setState(() {
           _statusMsg  = msg == 'NO_VIDEO_FRAME'
               ? '✗ 设备未输出视频帧（已保存 server 日志）'
@@ -324,16 +320,6 @@ class RemoteScreenState extends State<RemoteScreen>
     }
   }
 
-  Future<void> _readServerLogTail() async {
-    try {
-      final r = await context.read<AdbService>().shell(
-        'tail -n 60 $_kServerLogPath 2>/dev/null || cat $_kServerLogPath 2>/dev/null || echo "no_log"',
-        timeoutMs: 3000,
-      );
-      if (r.stdout.trim().isNotEmpty) {
-        // ignore: avoid_print
-        print('scrcpy_server.log tail:\n${r.stdout}');
-      }
     } catch (_) {}
   }
 
