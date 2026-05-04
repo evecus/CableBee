@@ -175,29 +175,37 @@ class RemoteScreenState extends State<RemoteScreen>
           '>/dev/null 2>&1 &';
       await adb.shell(serverCmd, timeoutMs: 3000).catchError((_) {});
 
-      // 等待 server socket 出现（最多5秒）
-      setState(() => _statusMsg = '等待 server 就绪...');
-      bool socketReady = false;
-      for (int i = 0; i < 25; i++) {
-        await Future.delayed(const Duration(milliseconds: 200));
-        final check = await adb.shell(
-          'cat /proc/net/unix | grep -c scrcpy 2>/dev/null || echo 0',
-          timeoutMs: 2000,
-        );
-        if ((int.tryParse(check.stdout.trim()) ?? 0) > 0) {
-          socketReady = true;
-          break;
-        }
-      }
-      if (!socketReady) throw Exception('server 启动超时，socket 未就绪');
-
-      // 3. adb forward
+      // 3. adb forward（先建隧道）
+      // tunnel_forward 模式下 server 启动后立即阻塞在 accept()，
+      // 需要先建好 forward，再去检测 server 是否就绪。
       setState(() => _statusMsg = '建立隧道...');
       await _kAdb.invokeMethod('forward', {
         'serial': serial,
         'local':  'tcp:5005',
         'remote': 'localabstract:scrcpy',
       });
+
+      // 等待 server socket 出现（最多6秒）
+      // /proc/net/unix 有 "scrcpy" 条目说明 LocalServerSocket 已在监听
+      setState(() => _statusMsg = '等待 server 就绪...');
+      bool socketReady = false;
+      for (int i = 0; i < 30; i++) {
+        await Future.delayed(const Duration(milliseconds: 200));
+        final check = await adb.shell(
+          'grep -c scrcpy /proc/net/unix 2>/dev/null || echo 0',
+          timeoutMs: 2000,
+        );
+        final count = int.tryParse(check.stdout.trim()) ?? 0;
+        if (count > 0) {
+          socketReady = true;
+          break;
+        }
+      }
+      // 若 grep 始终为 0，也允许继续尝试连接（部分内核不暴露 unix socket 列表）
+      if (!socketReady) {
+        // 额外等待 1 秒给 server 启动时间
+        await Future.delayed(const Duration(seconds: 1));
+      }
 
       // 4. 通知 Kotlin 侧开始连接 socket
       final textureId = await _kMethod.invokeMethod<int>('start', {
