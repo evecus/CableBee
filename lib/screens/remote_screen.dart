@@ -138,14 +138,40 @@ class RemoteScreenState extends State<RemoteScreen>
       final pushRes = await adb.pushAsset(serverAsset, remotePath);
       if (pushRes.exitCode != 0) throw Exception('推送失败: ${pushRes.stderr}');
 
-      // 2. 启动 server
+      // 2. 启动 server（scrcpy-server v3.x，key=value 参数格式）
       setState(() => _statusMsg = '启动 server...');
+      //
+      // v3.x 参数说明：
+      //   tunnel_forward=true   → server 监听 socket，客户端通过 adb forward 连接
+      //   video=true            → 开启视频流
+      //   audio=false           → 关闭音频（CableBee 不处理音频）
+      //   control=true          → 开启控制通道
+      //   max_size=N            → 最大边长（8 的倍数）
+      //   video_bit_rate=N      → 视频码率（bps）
+      //   max_fps=N             → 最大帧率
+      //   send_device_meta=true → 发送设备名（握手头 64 字节）
+      //   send_frame_meta=true  → 每帧前发送 12 字节帧头（PTS + size）
+      //   send_dummy_byte=true  → video socket 首字节为 dummy（连接检测）
+      //   send_codec_meta=true  → 握手头中包含 codec_id + width + height（12 字节）
+      //   cleanup=true          → server 退出时自动清理
+      //   power_on=true         → 启动时亮屏
       final serverCmd =
           'rm -f $_kServerLogPath; '
           'CLASSPATH=/data/local/tmp/scrcpy_server.apk '
-          'app_process ./ com.genymobile.scrcpy.Server '
-          '1.18 verbose $tunedMaxSize ${tunedBitRateMbps * 1000000} $tunedFps '
-          '-1 true - true true 0 false false - - false '
+          'app_process / com.genymobile.scrcpy.Server '
+          'tunnel_forward=true '
+          'video=true '
+          'audio=false '
+          'control=true '
+          'max_size=$tunedMaxSize '
+          'video_bit_rate=${tunedBitRateMbps * 1000000} '
+          'max_fps=$tunedFps '
+          'send_device_meta=true '
+          'send_frame_meta=true '
+          'send_dummy_byte=true '
+          'send_codec_meta=true '
+          'cleanup=true '
+          'power_on=true '
           '> $_kServerLogPath 2>&1 &';
       await adb.shell(serverCmd, timeoutMs: 3000).catchError((_) {});
 

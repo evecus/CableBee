@@ -8,15 +8,21 @@ import io.flutter.view.TextureRegistry
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
-import java.io.SequenceInputStream
-import java.io.ByteArrayInputStream
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * ScrcpySession — 只负责 socket 连接 + MediaCodec 解码 + 控制发送
- * push/forward/startServer 全部由 Flutter 侧通过 AdbService 完成
+ * ScrcpySession — 适配 scrcpy-server v3.x 协议
+ *
+ * v3.x 协议关键变化：
+ * 1. 启动参数改为 key=value 格式
+ * 2. video / control 各自独立 TCP 连接（audio 已禁用）
+ * 3. 握手：dummy(1) + deviceName(64) + codecMeta(12) = 77 字节
+ *    codecMeta = codec_id(4) + width(4) + height(4)，大端序
+ * 4. 帧头 config 标志：bit63 = 1（PACKET_FLAG_CONFIG），不再是 Long.MIN_VALUE
+ *    key frame 标志：bit62 = 1（PACKET_FLAG_KEY_FRAME）
+ *    实际 PTS 只用低 62 位
  */
 class ScrcpySession(
     private val textureEntry: TextureRegistry.SurfaceTextureEntry,
@@ -26,6 +32,12 @@ class ScrcpySession(
         private const val TAG = "ScrcpySession"
         private const val SCRCPY_PORT = 5005
 
+        // v3.x 帧标志（高位）
+        private const val PACKET_FLAG_CONFIG    = Long.MIN_VALUE          // bit63
+        private const val PACKET_FLAG_KEY_FRAME = 1L shl 62
+        private const val PTS_MASK              = (1L shl 62) - 1L       // 低62位
+
+        // control 消息类型（与 v1.x 相同）
         const val TYPE_INJECT_KEYCODE = 0
         const val TYPE_INJECT_TOUCH   = 2
         const val TYPE_INJECT_SCROLL  = 3
@@ -61,8 +73,9 @@ class ScrcpySession(
     }
 
     private fun _connect() {
-        // 连接 video socket
         onEvent("status", mapOf("msg" to "连接中..."))
+
+        // ── 1. 连接 video socket（重试最多 30 次）────────────────────────────
         var attempt = 0
         while (attempt < 30 && running) {
             try {
@@ -78,40 +91,36 @@ class ScrcpySession(
         val vSock = videoSocket
             ?: throw IOException("无法连接 scrcpy server，请检查设备 ADB 授权")
 
-        // 连接 control socket
+        // ── 2. 独立连接 control socket（v3.x 分离连接）──────────────────────
         controlSocket = Socket("127.0.0.1", SCRCPY_PORT)
         controlOut = controlSocket!!.getOutputStream()
 
-        // 兼容两种握手：
-        // A) dummy(1) + deviceName(64) + w(2) + h(2) = 69
-        // B) deviceName(64) + w(2) + h(2) = 68（无 dummy）
+        // ── 3. 读取握手头（v3.x）────────────────────────────────────────────
+        // 格式：dummy(1) + deviceName(64) + codec_id(4) + width(4) + height(4) = 77 字节
+        // send_dummy_byte=true（默认），send_device_meta=true，send_codec_meta=true
         val videoIn = vSock.getInputStream()
-        val header = videoIn.readExactly(69)
-        if (header.size < 69) throw IOException("握手数据不足：${header.size}/69")
-        val withDummyW = ((header[65].toInt() and 0xFF) shl 8) or (header[66].toInt() and 0xFF)
-        val withDummyH = ((header[67].toInt() and 0xFF) shl 8) or (header[68].toInt() and 0xFF)
-        val withDummyValid = withDummyW in 64..16384 && withDummyH in 64..16384
 
-        val noDummyW = ((header[64].toInt() and 0xFF) shl 8) or (header[65].toInt() and 0xFF)
-        val noDummyH = ((header[66].toInt() and 0xFF) shl 8) or (header[67].toInt() and 0xFF)
-        val noDummyValid = noDummyW in 64..16384 && noDummyH in 64..16384
+        val header = videoIn.readExactly(77)
+        if (header.size < 77) throw IOException("握手数据不足：${header.size}/77")
 
-        val decodedVideoIn: InputStream
-        val deviceName: String
-        if (withDummyValid || !noDummyValid) {
-            deviceName = String(header, 1, 64).trimEnd('\u0000')
-            deviceWidth = withDummyW
-            deviceHeight = withDummyH
-            decodedVideoIn = videoIn
-            Log.i(TAG, "handshake mode: with dummy byte")
-        } else {
-            deviceName = String(header, 0, 64).trimEnd('\u0000')
-            deviceWidth = noDummyW
-            deviceHeight = noDummyH
-            decodedVideoIn = SequenceInputStream(ByteArrayInputStream(byteArrayOf(header[68])), videoIn)
-            Log.i(TAG, "handshake mode: without dummy byte")
+        // byte[0]      = dummy byte（忽略）
+        // byte[1..64]  = device name（UTF-8, null 填充）
+        // byte[65..68] = codec id（big-endian uint32，H264=0x68323634）
+        // byte[69..72] = video width（big-endian int32）
+        // byte[73..76] = video height（big-endian int32）
+        val deviceName = String(header, 1, 64).trimEnd('\u0000')
+        val codecId    = ByteBuffer.wrap(header, 65, 4).order(ByteOrder.BIG_ENDIAN).int
+        val w          = ByteBuffer.wrap(header, 69, 4).order(ByteOrder.BIG_ENDIAN).int
+        val h          = ByteBuffer.wrap(header, 73, 4).order(ByteOrder.BIG_ENDIAN).int
+
+        Log.i(TAG, "handshake v3: name=$deviceName codec=0x${Integer.toHexString(codecId)} ${w}x${h}")
+
+        if (w <= 0 || h <= 0 || w > 16384 || h > 16384) {
+            throw IOException("握手分辨率无效：${w}x${h}")
         }
-        Log.i(TAG, "connected: $deviceName ${deviceWidth}x${deviceHeight}")
+
+        deviceWidth  = w
+        deviceHeight = h
 
         onEvent("connected", mapOf(
             "deviceName"   to deviceName,
@@ -120,7 +129,7 @@ class ScrcpySession(
         ))
 
         initDecoder()
-        startDecode(decodedVideoIn)
+        startDecode(videoIn)
     }
 
     // ── MediaCodec 解码 ──────────────────────────────────────────────────────
@@ -141,23 +150,21 @@ class ScrcpySession(
         decodeThread = Thread {
             val c = codec ?: return@Thread
             val timeoutUs = 10_000L
-            // scrcpy NO_PTS = Long.MIN_VALUE，表示 SPS/PPS config 帧
-            val NO_PTS = Long.MIN_VALUE
             var consecutiveInvalidFrames = 0
 
             try {
                 while (running) {
-                    // 每帧12字节元数据: PTS(8B long) + 帧大小(4B int)
+                    // 每帧 12 字节帧头：ptsAndFlags(8B long) + frameSize(4B int)，大端序
                     val meta = videoIn.readExactly(12)
                     if (meta.size < 12) break
 
-                    val pts = ByteBuffer.wrap(meta, 0, 8)
-                        .order(ByteOrder.BIG_ENDIAN).getLong()
+                    val ptsAndFlags = ByteBuffer.wrap(meta, 0, 8)
+                        .order(ByteOrder.BIG_ENDIAN).long
                     val frameSize = ByteBuffer.wrap(meta, 8, 4)
-                        .order(ByteOrder.BIG_ENDIAN).getInt() and 0x7FFFFFFF
+                        .order(ByteOrder.BIG_ENDIAN).int and 0x7FFFFFFF
 
                     if (frameSize <= 0 || frameSize > 10_000_000) {
-                        Log.w(TAG, "invalid frameSize=$frameSize pts=$pts")
+                        Log.w(TAG, "invalid frameSize=$frameSize ptsAndFlags=$ptsAndFlags")
                         consecutiveInvalidFrames++
                         if (consecutiveInvalidFrames >= 20) {
                             throw IOException("视频流格式异常（连续无效帧），请重试并降低分辨率/码率")
@@ -169,20 +176,22 @@ class ScrcpySession(
                     val frameData = videoIn.readExactly(frameSize)
                     if (frameData.size < frameSize) break
 
-                    // 判断是否为 config 帧（SPS/PPS）
-                    val isConfig = (pts == NO_PTS)
-                    val flags = if (isConfig) MediaCodec.BUFFER_FLAG_CODEC_CONFIG else 0
-                    val presentationUs = if (isConfig) 0L else pts
+                    // v3.x 标志解析
+                    // bit63 = PACKET_FLAG_CONFIG（config / SPS+PPS 帧）
+                    // bit62 = PACKET_FLAG_KEY_FRAME
+                    // 低62位 = 实际 PTS（微秒）
+                    val isConfig  = (ptsAndFlags and PACKET_FLAG_CONFIG) != 0L
+                    val pts       = if (isConfig) 0L else (ptsAndFlags and PTS_MASK)
+                    val flags     = if (isConfig) MediaCodec.BUFFER_FLAG_CODEC_CONFIG else 0
 
                     val inputIdx = c.dequeueInputBuffer(timeoutUs)
                     if (inputIdx >= 0) {
                         val buf = c.getInputBuffer(inputIdx) ?: continue
                         buf.clear()
                         buf.put(frameData, 0, frameSize)
-                        c.queueInputBuffer(inputIdx, 0, frameSize, presentationUs, flags)
+                        c.queueInputBuffer(inputIdx, 0, frameSize, pts, flags)
                     }
 
-                    // config 帧不渲染，普通帧渲染到 Surface
                     if (!isConfig) {
                         val info = MediaCodec.BufferInfo()
                         while (running) {
@@ -198,15 +207,13 @@ class ScrcpySession(
                                     if (outW > 0 && outH > 0) {
                                         textureEntry.surfaceTexture().setDefaultBufferSize(outW, outH)
                                         onEvent("connected", mapOf(
-                                            "deviceName" to "scrcpy",
-                                            "deviceWidth" to outW,
+                                            "deviceName"   to "scrcpy",
+                                            "deviceWidth"  to outW,
                                             "deviceHeight" to outH,
                                         ))
                                     }
                                 }
-                                outputIdx == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> {
-                                    // Deprecated on API 21+, ignore safely.
-                                }
+                                outputIdx == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> { /* ignore */ }
                                 else -> break
                             }
                         }
