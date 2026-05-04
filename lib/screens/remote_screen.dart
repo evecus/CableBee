@@ -131,34 +131,29 @@ class RemoteScreenState extends State<RemoteScreen>
       final tunedFps = tuned.$3;
 
       // 1. 推送 scrcpy server
+      // 优先推到 /sdcard/（部分电视 /data/local/tmp/ 无写权限）
+      // 回退到 /data/local/tmp/
       setState(() => _statusMsg = '正在推送 server...');
       const serverAsset = 'assets/scrcpy-server';
-      const remotePath  = '/data/local/tmp/scrcpy_server.apk';
-      final pushRes = await adb.pushAsset(serverAsset, remotePath);
+      const remotePath1 = '/sdcard/scrcpy_server.apk';
+      const remotePath2 = '/data/local/tmp/scrcpy_server.apk';
+
+      String remotePath = remotePath1;
+      var pushRes = await adb.pushAsset(serverAsset, remotePath1);
+      if (pushRes.exitCode != 0) {
+        remotePath = remotePath2;
+        pushRes = await adb.pushAsset(serverAsset, remotePath2);
+      }
       if (pushRes.exitCode != 0) throw Exception('推送失败: ${pushRes.stderr}');
 
       // 2. 启动 server（scrcpy-server v3.x，key=value 参数格式）
+      // 注意：部分电视（如 TCL）需要用 app_process ./ 而非 app_process /
+      //      否则会被系统 SELinux 策略 SIGKILL
       setState(() => _statusMsg = '启动 server...');
-      //
-      // v3.x 参数说明：
-      //   tunnel_forward=true   → server 监听 socket，客户端通过 adb forward 连接
-      //   video=true            → 开启视频流
-      //   audio=false           → 关闭音频（CableBee 不处理音频）
-      //   control=true          → 开启控制通道
-      //   max_size=N            → 最大边长（8 的倍数）
-      //   video_bit_rate=N      → 视频码率（bps）
-      //   max_fps=N             → 最大帧率
-      //   send_device_meta=true → 发送设备名（握手头 64 字节）
-      //   send_frame_meta=true  → 每帧前发送 12 字节帧头（PTS + size）
-      //   send_dummy_byte=true  → video socket 首字节为 dummy（连接检测）
-      //   send_codec_meta=true  → 握手头中包含 codec_id + width + height（12 字节）
-      //   cleanup=true          → server 退出时自动清理
-      //   power_on=true         → 启动时亮屏
-      // 注意：不重定向日志到文件（部分设备 /data/local/tmp 无写权限）
       final serverCmd =
-          'CLASSPATH=/data/local/tmp/scrcpy_server.apk '
-          'app_process / com.genymobile.scrcpy.Server '
-          '3.3.4 '  // v3.x 第一个参数必须是版本号
+          'CLASSPATH=$remotePath '
+          'app_process ./ com.genymobile.scrcpy.Server '
+          '3.3.4 '
           'tunnel_forward=true '
           'video=true '
           'audio=false '
