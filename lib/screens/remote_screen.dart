@@ -223,7 +223,7 @@ class RemoteScreenState extends State<RemoteScreen>
 
     // 2) bitrate：按总像素规模线性估算（相对 1080p），再做区间约束。
     //    1080p(2.07MP)≈8Mbps，2.5MP≈10Mbps，720p≈4~5Mbps。
-    final megaPixels = pixelCount / 1_000_000.0;
+    final megaPixels = pixelCount / 1000000.0;
     int bitRate = (megaPixels * 3.8).round();
     bitRate = bitRate.clamp(4, 14);
 
