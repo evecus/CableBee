@@ -231,8 +231,9 @@ class RemoteScreenState extends State<RemoteScreen>
     int fps = 30;
     if (megaPixels >= 4.0) fps = 24;       // 接近 2K/更高
     if (aspect >= 2.1) {
-      // 超长屏（如 1080x2400）避免服务端先缩放后导致解码尺寸不匹配，优先原始分辨率。
-      maxSize = 0;
+      // 超长屏（如 1080x2400）使用短边等比例编码尺寸，避免原始分辨率导致编码链路不稳定黑屏。
+      maxSize = (shortEdge ~/ 16) * 16;
+      if (maxSize < 720) maxSize = 720;
       fps = fps > 25 ? 25 : fps;
     }
 
