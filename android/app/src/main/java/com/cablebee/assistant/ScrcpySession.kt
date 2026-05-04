@@ -219,6 +219,9 @@ class ScrcpySession(
                     onEvent("error", mapOf("message" to (e.message ?: "视频解码失败")))
                 }
             }
+            if (running && decodedFrames == 0L) {
+                onEvent("error", mapOf("message" to "NO_VIDEO_FRAME"))
+            }
             Log.i(TAG, "decode thread ended")
         }.also { it.isDaemon = true; it.name = "scrcpy-decode"; it.start() }
     }
