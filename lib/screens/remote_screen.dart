@@ -211,12 +211,33 @@ class RemoteScreenState extends State<RemoteScreen>
     if (w <= 0 || h <= 0) return (_maxSize, _bitRate, _maxFps);
 
     final longEdge = w > h ? w : h;
-    // 档位策略：按长边自动匹配 maxSize / bitrate / fps
-    if (longEdge >= 3000) return (1440, 12, 30); // 2K+
-    if (longEdge >= 2200) return (1280, 10, 30); // 1080x2400 等高纵横比机型
-    if (longEdge >= 1920) return (1080, 8, 30);  // FHD
-    if (longEdge >= 1280) return (960, 6, 25);   // HD+
-    return (720, 4, 24);                         // 低分屏
+    final shortEdge = w > h ? h : w;
+    final pixelCount = w * h;
+    final aspect = longEdge / shortEdge;
+
+    // 1) maxSize：优先按短边，避免高纵横比机型（如 1080x2400）被错误放大到不稳定档位。
+    //    向下取到 16 的倍数，兼容更多编码器。
+    int maxSize = shortEdge.clamp(720, 1440);
+    maxSize = (maxSize ~/ 16) * 16;
+    if (maxSize < 720) maxSize = 720;
+
+    // 2) bitrate：按总像素规模线性估算（相对 1080p），再做区间约束。
+    //    1080p(2.07MP)≈8Mbps，2.5MP≈10Mbps，720p≈4~5Mbps。
+    final megaPixels = pixelCount / 1_000_000.0;
+    int bitRate = (megaPixels * 3.8).round();
+    bitRate = bitRate.clamp(4, 14);
+
+    // 3) fps：高分辨率或超长屏适当降帧，优先保稳定。
+    int fps = 30;
+    if (megaPixels >= 4.0) fps = 24;       // 接近 2K/更高
+    if (aspect >= 2.1) fps = fps > 25 ? 25 : fps; // 1080x2400 这类长屏
+
+    // 如果用户手动设置了更低档位，则尊重用户选择（不强制升档）。
+    maxSize = maxSize > _maxSize && _maxSize > 0 ? _maxSize : maxSize;
+    bitRate = bitRate > _bitRate ? _bitRate : bitRate;
+    fps = fps > _maxFps ? _maxFps : fps;
+
+    return (maxSize, bitRate, fps);
   }
 
   void _onEvent(dynamic raw) {
