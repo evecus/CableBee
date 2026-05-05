@@ -228,9 +228,9 @@ class MainActivity : FlutterActivity() {
                         Log.i(TAG, "selfPair: pairing resolved host=$hostAddr port=$port")
                         if (isLocalHost(hostAddr) && isPortListening(port)) {
                             discoveredPairPort = port
-                            Log.i(TAG, "selfPair: valid pairing port=$port, updating notification")
-                            // mDNS 发现端口 → 更新通知，端口已知，用户只需输入配对码
-                            ui { showPairCodeNotification(port = port) }
+                            Log.i(TAG, "selfPair: valid pairing port=$port, recorded (not updating notification to avoid disrupting user input)")
+                            // 不更新通知——用户可能正在输入，刷新会清空内容
+                            // discoveredPairPort 已记录，提交时会优先使用
                         }
                     }
                 })
@@ -331,11 +331,21 @@ class MainActivity : FlutterActivity() {
                 }
                 stopSelfPairDiscovery()
                 dismissNotification()
+                val finalPort = connectPort ?: 5555
+                ui {
+                    // 配对成功 → 把 App 拉到前台
+                    val launchIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
+                        flags = Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    if (launchIntent != null) startActivity(launchIntent)
+                }
+                // 等 App 回到前台、EventSink 就绪后再发事件
+                delay(600)
                 ui {
                     selfPairEventSink?.success(mapOf(
                         "type" to "success",
                         "message" to "配对成功",
-                        "connectPort" to (connectPort ?: 5555),
+                        "connectPort" to finalPort,
                     ))
                 }
             } else {
@@ -384,17 +394,15 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
-     * 发/更新配对通知。
-     * port == -1 → 端口未知，显示两个 RemoteInput（端口 + 配对码）
-     * port >  0  → mDNS 已发现端口，只显示一个 RemoteInput（配对码），标题里注明端口
+     * 发配对通知（始终显示端口+配对码两个输入框）。
+     * mDNS 若已发现端口，提交时会自动用 discoveredPairPort 覆盖用户填的端口。
      */
-    private fun showPairCodeNotification(port: Int) {
+    private fun showPairCodeNotification(port: Int = -1) {
         val nm = getSystemService(NotificationManager::class.java)
-        val portKnown = port > 0
 
         val replyIntent = Intent(ACTION_PAIR_CODE).apply {
             setPackage(packageName)
-            putExtra(EXTRA_PORT, port)  // -1 表示需从 RemoteInput 读取
+            putExtra(EXTRA_PORT, port)  // -1 或 mDNS 发现的端口（提交时用）
         }
         val replyPi = PendingIntent.getBroadcast(
             this, NOTIF_REQ_REPLY, replyIntent,
@@ -404,25 +412,17 @@ class MainActivity : FlutterActivity() {
                 PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val actionBuilder = if (portKnown) {
-            // 端口已知：只需输入配对码
-            val codeInput = RemoteInput.Builder(EXTRA_CODE)
-                .setLabel("输入配对码（6位数字）")
-                .build()
-            Notification.Action.Builder(null, "输入配对码", replyPi)
-                .addRemoteInput(codeInput)
-        } else {
-            // 端口未知：需要输入端口 + 配对码
-            val portInput = RemoteInput.Builder(EXTRA_PORT_INPUT)
-                .setLabel("输入端口号")
-                .build()
-            val codeInput = RemoteInput.Builder(EXTRA_CODE)
-                .setLabel("输入配对码（6位数字）")
-                .build()
-            Notification.Action.Builder(null, "输入端口和配对码", replyPi)
-                .addRemoteInput(portInput)
-                .addRemoteInput(codeInput)
-        }
+        // 始终两个输入框：端口 + 配对码
+        val portInput = RemoteInput.Builder(EXTRA_PORT_INPUT)
+            .setLabel("① 端口号（无线调试页面的数字，如 39987）")
+            .build()
+        val codeInput = RemoteInput.Builder(EXTRA_CODE)
+            .setLabel("② 配对码（6位数字，如 123456）")
+            .build()
+        val replyAction = Notification.Action.Builder(null, "输入配对码", replyPi)
+            .addRemoteInput(portInput)
+            .addRemoteInput(codeInput)
+            .build()
 
         val cancelIntent = Intent(ACTION_CANCEL_PAIR).setPackage(packageName)
         val cancelPi = PendingIntent.getBroadcast(
@@ -434,16 +434,13 @@ class MainActivity : FlutterActivity() {
         )
         val cancelAction = Notification.Action.Builder(null, "取消", cancelPi).build()
 
-        val title = if (portKnown) "CableBee 配对本机（端口 $port）"
-                    else "CableBee 配对本机"
-        val text  = if (portKnown) "已检测到配对服务，请输入无线调试弹窗中的配对码"
-                    else "请输入无线调试弹窗中显示的端口号和配对码"
-
         val notif = Notification.Builder(this, NOTIF_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle(title)
-            .setContentText(text)
-            .addAction(actionBuilder.build())
+            .setContentTitle("CableBee 配对本机")
+            .setContentText("点「输入配对码」→ 先填端口号，再填配对码（均来自无线调试弹窗）")
+            .setStyle(Notification.BigTextStyle()
+                .bigText("点「输入配对码」按钮：\n第1步 输入端口号（无线调试弹窗右上角的数字）\n第2步 输入配对码（弹窗中间的6位数字）"))
+            .addAction(replyAction)
             .addAction(cancelAction)
             .setOngoing(true)
             .build()
@@ -461,13 +458,13 @@ class MainActivity : FlutterActivity() {
         override fun onReceive(ctx: android.content.Context?, intent: Intent?) {
             when (intent?.action) {
                 ACTION_PAIR_CODE -> {
-                    val portFromIntent = intent.getIntExtra(EXTRA_PORT, -1)
                     val results = RemoteInput.getResultsFromIntent(intent)
                     val code = results?.getCharSequence(EXTRA_CODE)?.toString()?.trim() ?: ""
 
-                    // 端口：优先用 mDNS 已填好的，否则读用户输入的 RemoteInput
-                    val port = if (portFromIntent > 0) {
-                        portFromIntent
+                    // 端口优先级：mDNS 已发现 > 用户手动输入
+                    val port = if (discoveredPairPort > 0) {
+                        Log.i(TAG, "selfPair: using mDNS discovered port=$discoveredPairPort")
+                        discoveredPairPort
                     } else {
                         results?.getCharSequence(EXTRA_PORT_INPUT)?.toString()?.trim()?.toIntOrNull() ?: -1
                     }
