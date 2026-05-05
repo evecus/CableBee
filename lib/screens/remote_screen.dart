@@ -93,22 +93,10 @@ class RemoteScreenState extends State<RemoteScreen>
   void _pushActions() {
     widget.onActionsChanged?.call([
       if (_connected)
-        PopupMenuButton<String>(
-          icon: const Icon(Icons.more_vert_rounded,
-              size: 20, color: AppTheme.textMuted),
-          color: AppTheme.bg1,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          onSelected: (v) {
-            if (v == 'disconnect') _stopSession();
-            if (v == 'quality')   _showQualityDialog();
-          },
-          itemBuilder: (_) => const [
-            PopupMenuItem(value: 'quality',
-                child: _MenuRow(icon: Icons.tune_rounded, label: '质量设置')),
-            PopupMenuItem(value: 'disconnect',
-                child: _MenuRow(icon: Icons.link_off_rounded,
-                    label: '断开投屏', color: AppTheme.danger)),
-          ],
+        TextButton(
+          onPressed: _stopSession,
+          child: const Text('断开',
+              style: TextStyle(color: AppTheme.danger, fontFamily: 'SpaceMono', fontSize: 14)),
         ),
     ]);
   }
