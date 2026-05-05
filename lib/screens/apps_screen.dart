@@ -1110,7 +1110,6 @@ class AppsScreenState extends State<AppsScreen>
     );
     if (apkPath == null || !mounted) return;
     await _pushAndInstall(apkPath);
-    if (res.isSuccess) _loadApps();
   }
 
   // ── 构建 ─────────────────────────────────────────────────────────────────────
