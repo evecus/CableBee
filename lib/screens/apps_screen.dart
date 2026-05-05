@@ -982,8 +982,7 @@ class AppsScreenState extends State<AppsScreen>
       _busyPackage = null;
       _actionResult = res.isSuccess
           ? '✓ 已保存到 $savePath'
-          : '✗ 下载失败: ${res.output}
-APK路径: $apkPath';
+          : "✗ 下载失败: ${res.output}\nAPK: $apkPath";
     });
   }
 
