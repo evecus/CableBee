@@ -107,10 +107,12 @@ class AppsScreenState extends State<AppsScreen>
     setState(() {
       _loading = true;
       _apps = [];
+      _filtered = [];
       _actionResult = null;
     });
 
-    // 流式接收，每收到一个 package 立即追加到列表并刷新 UI
+    // 流式接收：每收到一条立即追加并显示，加载中不排序避免列表抖动
+    int _batchCount = 0;
     await for (final pkgInfo in _pkgServer!.streamPackages()) {
       if (!mounted) return;
       final ex = AppInfoEx(
@@ -118,12 +120,21 @@ class AppsScreenState extends State<AppsScreen>
         isDisabled: !pkgInfo.enabled,
         isFrozen:   !pkgInfo.enabled,
       );
-      setState(() {
-        _apps.add(ex);
-      });
-      _applyFilter();
+      _apps.add(ex);
+      // 每10条刷新一次UI，减少重建频率同时保持逐条出现的效果
+      _batchCount++;
+      if (_batchCount % 10 == 0) {
+        // 加载中只过滤不排序，避免排序导致列表大幅跳动
+        final list = _apps.where((a) {
+          if (a.isSystem && !_showSystem) return false;
+          if (!a.isSystem && !_showThirdParty) return false;
+          return true;
+        }).toList();
+        setState(() => _filtered = list);
+      }
     }
 
+    // 全部加载完成后统一排序
     if (mounted) {
       setState(() => _loading = false);
       _applyFilter();
