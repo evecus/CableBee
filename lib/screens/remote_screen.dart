@@ -408,17 +408,24 @@ class RemoteScreenState extends State<RemoteScreen>
   bool get _devIsLandscape => _devW > _devH;
 
   // 将渲染坐标换算为设备坐标
-  // 横屏设备在竖屏手机上显示时，视图被旋转了90°，坐标也需要对应旋转映射
+  // 横屏设备使用 RotatedBox(quarterTurns: 1) 顺时针旋转90°显示
+  //
+  // 顺时针旋转90°后四角对应关系（纹理→屏幕）：
+  //   纹理左上角(0,0)     → 屏幕右上角(renderW, 0)
+  //   纹理右上角(devW,0)  → 屏幕右下角(renderW, renderH)
+  //   纹理左下角(0,devH)  → 屏幕左上角(0, 0)
+  //   纹理右下角(devW,devH)→ 屏幕左下角(0, renderH)
+  //
+  // 逆推：屏幕坐标(dx, dy) → 设备坐标：
+  //   devX = (renderH - dy) * devW/renderH  （dy↑ → devX↓，需翻转）
+  //   devY = (renderW - dx) * devH/renderW  （dx↑ → devY↓，也需翻转）
   Offset _toDev(Offset local, Size renderSize) {
     if (_devIsLandscape) {
-      // 视图旋转了90°逆时针（手机竖持显示横屏内容）
-      // renderSize 是旋转后的显示区域（宽<高），但设备坐标系是横屏（宽>高）
-      // local.dx 对应设备 y 轴，local.dy 对应设备 x 轴（翻转）
       final scaleX = _devW / renderSize.height;
       final scaleY = _devH / renderSize.width;
       return Offset(
-        (renderSize.height - local.dy) * scaleX, // 旋转后 dy -> 设备 x（需翻转）
-        local.dx * scaleY,                        // 旋转后 dx -> 设备 y
+        (renderSize.height - local.dy) * scaleX, // dy 翻转 → 设备 x
+        (renderSize.width  - local.dx) * scaleY, // dx 翻转 → 设备 y
       );
     }
     final scaleX = _devW / renderSize.width;
