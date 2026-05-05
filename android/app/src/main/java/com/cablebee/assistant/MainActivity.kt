@@ -228,9 +228,9 @@ class MainActivity : FlutterActivity() {
                         Log.i(TAG, "selfPair: pairing resolved host=$hostAddr port=$port")
                         if (isLocalHost(hostAddr) && isPortListening(port)) {
                             discoveredPairPort = port
-                            Log.i(TAG, "selfPair: valid pairing port=$port, updating notification (user now only needs to enter code)")
-                            // mDNS 发现端口 → 刷新通知，用户从「端口:配对码」简化为只输「配对码」
-                            ui { showPairCodeNotification() }
+                            Log.i(TAG, "selfPair: valid pairing port=$port, updating notification")
+                            // 只在配对流程仍进行中时才更新通知，避免配对成功后又重新弹出
+                            if (selfPairingActive) ui { showPairCodeNotification() }
                         }
                     }
                 })
@@ -492,8 +492,8 @@ class MainActivity : FlutterActivity() {
                         executeSelfPair(port, code)
                     } else {
                         Log.w(TAG, "selfPair: invalid port=$port or empty code, ignoring")
-                        // 输入格式有误，更新通知提示用户重新输入
-                        ui { showPairCodeNotification() }
+                        // 输入格式有误，且流程仍在进行时才重置通知
+                        if (selfPairingActive) ui { showPairCodeNotification() }
                     }
                 }
                 ACTION_CANCEL_PAIR -> {
