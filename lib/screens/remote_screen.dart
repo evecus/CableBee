@@ -421,12 +421,13 @@ class RemoteScreenState extends State<RemoteScreen>
   //   devY = (renderW - dx) * devH/renderW  （dx↑ → devY↓，也需翻转）
   Offset _toDev(Offset local, Size renderSize) {
     if (_devIsLandscape) {
-      // 手机横屏操作，方向与电视一致，直接按比例映射
-      final scaleX = _devW / renderSize.width;
-      final scaleY = _devH / renderSize.height;
+      // quarterTurns:1 顺时针旋转，手机竖持操作横屏设备
+      // 手机 dy → 设备 x，手机 dx → 设备 y（翻转）
+      final scaleX = _devW / renderSize.height;
+      final scaleY = _devH / renderSize.width;
       return Offset(
-        local.dx * scaleX,
-        local.dy * scaleY,
+        local.dy * scaleX,
+        (renderSize.width - local.dx) * scaleY,
       );
     }
     final scaleX = _devW / renderSize.width;
@@ -602,8 +603,9 @@ class RemoteScreenState extends State<RemoteScreen>
       final areaH = constraints.maxHeight;
 
       if (_devIsLandscape) {
-        // 横屏设备：手机也横屏操作，直接按设备宽高比显示，不旋转
-        final devAspect = _devW / _devH;
+        // 横屏设备：旋转90°在竖屏手机上最大化显示
+        // 旋转后显示比例 = devH/devW（竖向）
+        final devAspect = _devH / _devW;
         final areaAspect = areaW / areaH;
         double renderW, renderH;
         if (devAspect > areaAspect) {
@@ -622,7 +624,14 @@ class RemoteScreenState extends State<RemoteScreen>
               onPointerDown: (e) => _onPointerDown(e, listenerSize),
               onPointerMove: (e) => _onPointerMove(e, listenerSize),
               onPointerUp:   (e) => _onPointerUp(e,   listenerSize),
-              child: Texture(textureId: tid),
+              child: RotatedBox(
+                quarterTurns: 1,
+                child: SizedBox(
+                  width: renderH,
+                  height: renderW,
+                  child: Texture(textureId: tid),
+                ),
+              ),
             ),
           ),
         );
