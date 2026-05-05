@@ -43,6 +43,7 @@ class MainActivity : FlutterActivity() {
         private const val ACTION_CANCEL_PAIR = "com.cablebee.ACTION_CANCEL_PAIR"
         private const val EXTRA_CODE         = "pair_code"
         private const val EXTRA_PORT         = "pair_port"
+        private const val EXTRA_PORT_INPUT   = "pair_port_input"  // 用户手动输入的端口
         private const val TLS_PAIRING_TYPE   = "_adb-tls-pairing._tcp"
         private const val TLS_CONNECT_TYPE   = "_adb-tls-connect._tcp"
     }
@@ -198,6 +199,9 @@ class MainActivity : FlutterActivity() {
         ensureNotifChannel()
         nsdManager = getSystemService(NsdManager::class.java)
 
+        // 立刻发通知——端口未知，让用户手动填端口+配对码
+        ui { showPairCodeNotification(port = -1) }
+
         // ── 监听配对端口 (_adb-tls-pairing._tcp) ─────────────────────────
         val pairingListener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(type: String) {
@@ -224,8 +228,9 @@ class MainActivity : FlutterActivity() {
                         Log.i(TAG, "selfPair: pairing resolved host=$hostAddr port=$port")
                         if (isLocalHost(hostAddr) && isPortListening(port)) {
                             discoveredPairPort = port
-                            Log.i(TAG, "selfPair: valid pairing port=$port, posting notification")
-                            ui { showPairCodeNotification(port) }
+                            Log.i(TAG, "selfPair: valid pairing port=$port, updating notification")
+                            // mDNS 发现端口 → 更新通知，端口已知，用户只需输入配对码
+                            ui { showPairCodeNotification(port = port) }
                         }
                     }
                 })
@@ -378,17 +383,18 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    /**
+     * 发/更新配对通知。
+     * port == -1 → 端口未知，显示两个 RemoteInput（端口 + 配对码）
+     * port >  0  → mDNS 已发现端口，只显示一个 RemoteInput（配对码），标题里注明端口
+     */
     private fun showPairCodeNotification(port: Int) {
         val nm = getSystemService(NotificationManager::class.java)
-
-        // RemoteInput：用户在通知栏直接输入配对码
-        val remoteInput = RemoteInput.Builder(EXTRA_CODE)
-            .setLabel("输入配对码")
-            .build()
+        val portKnown = port > 0
 
         val replyIntent = Intent(ACTION_PAIR_CODE).apply {
             setPackage(packageName)
-            putExtra(EXTRA_PORT, port)
+            putExtra(EXTRA_PORT, port)  // -1 表示需从 RemoteInput 读取
         }
         val replyPi = PendingIntent.getBroadcast(
             this, NOTIF_REQ_REPLY, replyIntent,
@@ -397,9 +403,26 @@ class MainActivity : FlutterActivity() {
             else
                 PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val replyAction = Notification.Action.Builder(
-            null, "输入配对码", replyPi
-        ).addRemoteInput(remoteInput).build()
+
+        val actionBuilder = if (portKnown) {
+            // 端口已知：只需输入配对码
+            val codeInput = RemoteInput.Builder(EXTRA_CODE)
+                .setLabel("输入配对码（6位数字）")
+                .build()
+            Notification.Action.Builder(null, "输入配对码", replyPi)
+                .addRemoteInput(codeInput)
+        } else {
+            // 端口未知：需要输入端口 + 配对码
+            val portInput = RemoteInput.Builder(EXTRA_PORT_INPUT)
+                .setLabel("输入端口号")
+                .build()
+            val codeInput = RemoteInput.Builder(EXTRA_CODE)
+                .setLabel("输入配对码（6位数字）")
+                .build()
+            Notification.Action.Builder(null, "输入端口和配对码", replyPi)
+                .addRemoteInput(portInput)
+                .addRemoteInput(codeInput)
+        }
 
         val cancelIntent = Intent(ACTION_CANCEL_PAIR).setPackage(packageName)
         val cancelPi = PendingIntent.getBroadcast(
@@ -411,11 +434,16 @@ class MainActivity : FlutterActivity() {
         )
         val cancelAction = Notification.Action.Builder(null, "取消", cancelPi).build()
 
+        val title = if (portKnown) "CableBee 配对本机（端口 $port）"
+                    else "CableBee 配对本机"
+        val text  = if (portKnown) "已检测到配对服务，请输入无线调试弹窗中的配对码"
+                    else "请输入无线调试弹窗中显示的端口号和配对码"
+
         val notif = Notification.Builder(this, NOTIF_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle("CableBee 检测到配对服务")
-            .setContentText("请在下方输入无线调试弹窗中显示的配对码")
-            .addAction(replyAction)
+            .setContentTitle(title)
+            .setContentText(text)
+            .addAction(actionBuilder.build())
             .addAction(cancelAction)
             .setOngoing(true)
             .build()
@@ -433,12 +461,22 @@ class MainActivity : FlutterActivity() {
         override fun onReceive(ctx: android.content.Context?, intent: Intent?) {
             when (intent?.action) {
                 ACTION_PAIR_CODE -> {
-                    val port = intent.getIntExtra(EXTRA_PORT, -1)
+                    val portFromIntent = intent.getIntExtra(EXTRA_PORT, -1)
                     val results = RemoteInput.getResultsFromIntent(intent)
                     val code = results?.getCharSequence(EXTRA_CODE)?.toString()?.trim() ?: ""
+
+                    // 端口：优先用 mDNS 已填好的，否则读用户输入的 RemoteInput
+                    val port = if (portFromIntent > 0) {
+                        portFromIntent
+                    } else {
+                        results?.getCharSequence(EXTRA_PORT_INPUT)?.toString()?.trim()?.toIntOrNull() ?: -1
+                    }
+
                     Log.i(TAG, "selfPair: got code=$code port=$port from notification")
                     if (port > 0 && code.isNotEmpty()) {
                         executeSelfPair(port, code)
+                    } else {
+                        Log.w(TAG, "selfPair: invalid port=$port or empty code, ignoring")
                     }
                 }
                 ACTION_CANCEL_PAIR -> {
