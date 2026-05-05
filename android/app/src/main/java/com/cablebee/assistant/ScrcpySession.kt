@@ -104,7 +104,7 @@ class ScrcpySession(
         val cSock = Socket("127.0.0.1", SCRCPY_PORT)
         controlSocket = cSock
         controlOut = cSock.getOutputStream()
-        Log.i(TAG, "control socket connected")
+        Log.i(TAG, "control socket connected: isConnected=${cSock.isConnected} isClosed=${cSock.isClosed} localPort=${cSock.localPort} remotePort=${cSock.port}")
 
         // ── 3. 读取握手头（v3.x）────────────────────────────────────────────
         // 格式：dummy(1) + deviceName(64) + codec_id(4) + width(4) + height(4) = 77 字节
@@ -296,7 +296,7 @@ class ScrcpySession(
             out.flush()
             Log.d(TAG, "sendControl: sent ${data.size}B, type=0x${data[0].toInt().and(0xFF).toString(16)}")
         } catch (e: Exception) {
-            Log.e(TAG, "sendControl failed: ${e.message}")
+            Log.e(TAG, "sendControl failed: ${e.javaClass.simpleName} msg=${e.message} sock=${controlSocket?.isClosed}/${controlSocket?.isConnected}")
         }
     }
 
