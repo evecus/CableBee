@@ -39,6 +39,7 @@ class FilesScreenState extends State<FilesScreen>
   bool _transferring = false;
   String? _transferMessage;
   SortMode _sortMode = SortMode.name;
+  bool _showHidden = false;  // 是否显示 . 开头的隐藏文件
 
   // 多选模式
   bool _multiSelect = false;
@@ -61,6 +62,11 @@ class FilesScreenState extends State<FilesScreen>
         currentSort: _sortMode,
         onSortChanged: (m) {
           setState(() => _sortMode = m);
+          _applySortAndSet(_entries);
+        },
+        showHidden: _showHidden,
+        onHiddenChanged: (v) {
+          setState(() => _showHidden = v);
           _applySortAndSet(_entries);
         },
       ),
@@ -86,7 +92,11 @@ class FilesScreenState extends State<FilesScreen>
   }
 
   void _applySortAndSet(List<FileEntry> raw, {String? newPath}) {
-    final sorted = List<FileEntry>.from(raw);
+    // 过滤隐藏文件（以 . 开头）
+    final visible = _showHidden
+        ? raw
+        : raw.where((e) => !e.name.startsWith('.')).toList();
+    final sorted = List<FileEntry>.from(visible);
     sorted.sort((a, b) {
       if (a.isDirectory && !b.isDirectory) return -1;
       if (!a.isDirectory && b.isDirectory) return 1;
@@ -619,11 +629,15 @@ class _MoreMenuButton extends StatelessWidget {
   final VoidCallback onRefresh;
   final SortMode currentSort;
   final void Function(SortMode) onSortChanged;
+  final bool showHidden;
+  final void Function(bool) onHiddenChanged;
 
   const _MoreMenuButton({
     required this.onRefresh,
     required this.currentSort,
     required this.onSortChanged,
+    required this.showHidden,
+    required this.onHiddenChanged,
   });
 
   @override
@@ -643,6 +657,8 @@ class _MoreMenuButton extends StatelessWidget {
             onSortChanged(SortMode.time);
           case 'sort_size':
             onSortChanged(SortMode.size);
+          case 'toggle_hidden':
+            onHiddenChanged(!showHidden);
         }
       },
       itemBuilder: (_) => [
@@ -654,6 +670,17 @@ class _MoreMenuButton extends StatelessWidget {
         _sortItem('sort_name', '名称', SortMode.name),
         _sortItem('sort_time', '时间', SortMode.time),
         _sortItem('sort_size', '大小', SortMode.size),
+        const PopupMenuDivider(),
+        PopupMenuItem(
+          value: 'toggle_hidden',
+          child: _MenuRow(
+            icon: showHidden
+                ? Icons.check_box_rounded
+                : Icons.check_box_outline_blank_rounded,
+            label: '显示隐藏文件',
+            iconColor: showHidden ? AppTheme.primary : AppTheme.textMuted,
+          ),
+        ),
       ],
     );
   }
