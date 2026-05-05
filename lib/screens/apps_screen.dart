@@ -111,9 +111,10 @@ class AppsScreenState extends State<AppsScreen>
       _actionResult = null;
     });
 
-    // 流式接收：每收到一条立即追加并显示，加载中不排序避免列表抖动
+    // 流式接收：服务端已按排序方式输出，每10条刷新一次UI
+    final sortBy = _sortMode == SortMode.packageName ? 'package' : 'label';
     int _batchCount = 0;
-    await for (final pkgInfo in _pkgServer!.streamPackages()) {
+    await for (final pkgInfo in _pkgServer!.streamPackages(sortBy: sortBy)) {
       if (!mounted) return;
       final ex = AppInfoEx(
         pkg: pkgInfo,
@@ -121,10 +122,9 @@ class AppsScreenState extends State<AppsScreen>
         isFrozen:   !pkgInfo.enabled,
       );
       _apps.add(ex);
-      // 每10条刷新一次UI，减少重建频率同时保持逐条出现的效果
       _batchCount++;
       if (_batchCount % 10 == 0) {
-        // 加载中只过滤不排序，避免排序导致列表大幅跳动
+        // 服务端已排好序，只需过滤，不用再sort
         final list = _apps.where((a) {
           if (a.isSystem && !_showSystem) return false;
           if (!a.isSystem && !_showThirdParty) return false;
@@ -134,10 +134,15 @@ class AppsScreenState extends State<AppsScreen>
       }
     }
 
-    // 全部加载完成后统一排序
+    // 加载完成，最终过滤（不排序，服务端已排好）
     if (mounted) {
       setState(() => _loading = false);
-      _applyFilter();
+      final list = _apps.where((a) {
+        if (a.isSystem && !_showSystem) return false;
+        if (!a.isSystem && !_showThirdParty) return false;
+        return true;
+      }).toList();
+      setState(() => _filtered = list);
     }
   }
 
