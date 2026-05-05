@@ -29,6 +29,7 @@ class MainActivity : FlutterActivity() {
         private const val USB_CHANNEL        = "com.cablebee/usb"
         private const val USB_EVENTS         = "com.cablebee/usb_events"
         private const val ADB_CHANNEL        = "com.cablebee/adb"
+        private const val SHELL_STREAM_EVENTS = "com.cablebee/shell_stream"
         private const val LOCAL_APPS_CHANNEL = "com.cablebee.assistant/local_apps"
         private const val SCRCPY_METHOD      = ScrcpyChannel.METHOD_CHANNEL
         private const val SCRCPY_EVENTS      = ScrcpyChannel.EVENT_CHANNEL
@@ -737,6 +738,49 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        // ── SHELL STREAM ──────────────────────────────────────────────────
+        // 逐行实时推送 adb shell 输出，供 Flutter 流式消费
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, SHELL_STREAM_EVENTS)
+            .setStreamHandler(object : EventChannel.StreamHandler {
+                private var streamJob: kotlinx.coroutines.Job? = null
+
+                override fun onListen(arguments: Any?, sink: EventChannel.EventSink?) {
+                    if (sink == null) return
+                    val args   = arguments as? Map<*, *> ?: return
+                    val serial  = args["serial"]  as? String ?: return
+                    val command = args["command"] as? String ?: return
+                    val timeout = (args["timeoutMs"] as? Int)?.toLong() ?: 120_000L
+
+                    streamJob = scope.launch {
+                        try {
+                            val cmd = mutableListOf(adbBin.absolutePath, "-s", serial, "shell", command)
+                            val proc = ProcessBuilder(cmd).apply {
+                                environment()["HOME"]                    = filesDir.absolutePath
+                                environment()["TMPDIR"]                  = cacheDir.absolutePath
+                                environment()["ANDROID_ADB_SERVER_PORT"] = "15037"
+                            }.redirectErrorStream(false).start()
+
+                            // 逐行读取 stdout，实时推送到 Flutter
+                            val reader = proc.inputStream.bufferedReader()
+                            val deadline = System.currentTimeMillis() + timeout
+                            while (System.currentTimeMillis() < deadline) {
+                                val line = reader.readLine() ?: break  // EOF
+                                ui { sink.success(line) }
+                            }
+                            proc.destroyForcibly()
+                            ui { sink.endOfStream() }
+                        } catch (e: Exception) {
+                            ui { sink.error("SHELL_STREAM_ERROR", e.message, null) }
+                        }
+                    }
+                }
+
+                override fun onCancel(arguments: Any?) {
+                    streamJob?.cancel()
+                    streamJob = null
+                }
+            })
 
         // ── SELF PAIR EVENTS ──────────────────────────────────────────────
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, SELF_PAIR_EVENTS)
