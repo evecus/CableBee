@@ -128,14 +128,13 @@ class PkgServerService {
     await _ensureDeployed();
     final dex = _activeDex!;
     final androidData = dex.startsWith('/sdcard') ? 'ANDROID_DATA=/sdcard ' : '';
-    final res = await _adb.shell(
-        'CLASSPATH=$dex ${androidData}'
+    final cmd = 'CLASSPATH=$dex ${androidData}'
         'app_process ./ '
         'com.cablebee.pkgserver.Main '
-        '2>/dev/null',
-        timeoutMs: 120000); // 2 min for large package lists
+        '2>/dev/null';
 
-    for (final line in res.stdout.split('\n')) {
+    // 真正流式：每读到一行 JSON 就立刻 yield，不等全部完成
+    await for (final line in _adb.shellStream(cmd, timeoutMs: 120000)) {
       final t = line.trim();
       if (t.isEmpty || !t.startsWith('{')) continue;
       try {
