@@ -95,7 +95,7 @@ class PkgServerService {
 
   /// Stream all packages from the connected device, one [PkgInfo] at a time.
   /// Yields each package as soon as it's parsed — no waiting for the full list.
-  Stream<PkgInfo> streamPackages() => _run();
+  Stream<PkgInfo> streamPackages({String sortBy = 'package'}) => _run(sortBy: sortBy);
 
   /// Fetch info for a single package.
   Future<PkgInfo?> getPackage(String packageName) async {
@@ -124,13 +124,14 @@ class PkgServerService {
 
   // ── Internal ───────────────────────────────────────────────────────────────
 
-  Stream<PkgInfo> _run() async* {
+  Stream<PkgInfo> _run({String sortBy = 'package'}) async* {
     await _ensureDeployed();
     final dex = _activeDex!;
     final androidData = dex.startsWith('/sdcard') ? 'ANDROID_DATA=/sdcard ' : '';
     final cmd = 'CLASSPATH=$dex ${androidData}'
         'app_process ./ '
         'com.cablebee.pkgserver.Main '
+        '--sort=$sortBy '
         '2>/dev/null';
 
     // 真正流式：每读到一行 JSON 就立刻 yield，不等全部完成
