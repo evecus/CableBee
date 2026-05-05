@@ -285,18 +285,23 @@ class ScrcpySession(
 
     fun sendBackOrScreenOn() = sendControl(byteArrayOf(TYPE_BACK_OR_SCREEN.toByte()))
 
+    // 专用控制消息发送线程（避免 NetworkOnMainThreadException）
+    private val controlExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+
     private fun sendControl(data: ByteArray) {
         val out = controlOut
         if (out == null) {
             Log.w(TAG, "sendControl: controlOut is null, dropping ${data.size}B")
             return
         }
-        try {
-            out.write(data)
-            out.flush()
-            Log.d(TAG, "sendControl: sent ${data.size}B, type=0x${data[0].toInt().and(0xFF).toString(16)}")
-        } catch (e: Exception) {
-            Log.e(TAG, "sendControl failed: ${e.javaClass.simpleName} msg=${e.message} sock=${controlSocket?.isClosed}/${controlSocket?.isConnected}")
+        controlExecutor.execute {
+            try {
+                out.write(data)
+                out.flush()
+                Log.d(TAG, "sendControl: sent ${data.size}B type=0x${data[0].toInt().and(0xFF).toString(16)}")
+            } catch (e: Exception) {
+                Log.e(TAG, "sendControl failed: ${e.javaClass.simpleName} msg=${e.message}")
+            }
         }
     }
 
@@ -304,6 +309,7 @@ class ScrcpySession(
 
     fun stop() {
         running = false
+        controlExecutor.shutdown()
         try { videoSocket?.close()   } catch (_: Exception) {}
         try { controlSocket?.close() } catch (_: Exception) {}
         try { codec?.stop(); codec?.release() } catch (_: Exception) {}
