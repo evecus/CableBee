@@ -421,11 +421,12 @@ class RemoteScreenState extends State<RemoteScreen>
   //   devY = (renderW - dx) * devH/renderW  （dx↑ → devY↓，也需翻转）
   Offset _toDev(Offset local, Size renderSize) {
     if (_devIsLandscape) {
-      final scaleX = _devW / renderSize.height;
-      final scaleY = _devH / renderSize.width;
+      // 手机横屏操作，方向与电视一致，直接按比例映射
+      final scaleX = _devW / renderSize.width;
+      final scaleY = _devH / renderSize.height;
       return Offset(
-        (renderSize.height - local.dy) * scaleX, // dy 翻转 → 设备 x
-        local.dx * scaleY,                        // dx → 设备 y
+        local.dx * scaleX,
+        local.dy * scaleY,
       );
     }
     final scaleX = _devW / renderSize.width;
@@ -601,9 +602,8 @@ class RemoteScreenState extends State<RemoteScreen>
       final areaH = constraints.maxHeight;
 
       if (_devIsLandscape) {
-        // 横屏设备：将视图旋转90°后在竖屏手机上显示
-        // 旋转后设备的"显示宽高比"= devH/devW（竖向）
-        final devAspect = _devH / _devW;
+        // 横屏设备：手机也横屏操作，直接按设备宽高比显示，不旋转
+        final devAspect = _devW / _devH;
         final areaAspect = areaW / areaH;
         double renderW, renderH;
         if (devAspect > areaAspect) {
@@ -613,7 +613,6 @@ class RemoteScreenState extends State<RemoteScreen>
           renderH = areaH;
           renderW = areaH * devAspect;
         }
-        // renderSize 传给 _toDev 的是旋转后的显示尺寸（宽<高）
         final listenerSize = Size(renderW, renderH);
         return Center(
           child: SizedBox(
@@ -623,14 +622,7 @@ class RemoteScreenState extends State<RemoteScreen>
               onPointerDown: (e) => _onPointerDown(e, listenerSize),
               onPointerMove: (e) => _onPointerMove(e, listenerSize),
               onPointerUp:   (e) => _onPointerUp(e,   listenerSize),
-              child: RotatedBox(
-                quarterTurns: 1, // 顺时针旋转90°，横屏内容变为竖向显示
-                child: SizedBox(
-                  width: renderH,  // 旋转前纹理的宽
-                  height: renderW, // 旋转前纹理的高
-                  child: Texture(textureId: tid),
-                ),
-              ),
+              child: Texture(textureId: tid),
             ),
           ),
         );
