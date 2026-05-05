@@ -13,7 +13,8 @@ import 'package:path_provider/path_provider.dart';
 import '../models/device.dart';
 import 'binary_manager.dart';
 
-const _ch = MethodChannel('com.cablebee/adb');
+const _ch          = MethodChannel('com.cablebee/adb');
+const _shellStream = EventChannel('com.cablebee/shell_stream');
 
 class AdbService extends ChangeNotifier {
   List<AdbDevice> _devices        = [];
@@ -146,10 +147,15 @@ class AdbService extends ChangeNotifier {
     }
   }
 
-  Stream<String> shellStream(String command) async* {
-    if (!hasDevice) return;
-    final result = await shell(command, timeoutMs: 8000);
-    for (final line in result.stdout.split('\n')) yield line;
+  Stream<String> shellStream(String command, {int timeoutMs = 120000}) {
+    if (!hasDevice) return const Stream.empty();
+    return _shellStream
+        .receiveBroadcastStream({
+          'serial':    _selectedDevice!.serial,
+          'command':   command,
+          'timeoutMs': timeoutMs,
+        })
+        .map((e) => e as String);
   }
 
   // ── push / pull ───────────────────────────────────────────────────────────
