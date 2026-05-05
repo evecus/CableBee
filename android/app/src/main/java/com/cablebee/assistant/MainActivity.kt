@@ -65,6 +65,7 @@ class MainActivity : FlutterActivity() {
     private var discoveredPairPort: Int = -1
     private var discoveredConnectPort: Int = -1   // _adb-tls-connect 端口，adb connect 用这个
     private var selfPairingActive = false
+    private var pairSucceeded = false  // 配对成功标志，onResume 时用来关闭成功通知
 
     // ── 初始化二进制路径 ──────────────────────────────────────────────────────
 
@@ -330,7 +331,8 @@ class MainActivity : FlutterActivity() {
                     findConnectPortFromDevices()
                 }
                 stopSelfPairDiscovery()
-                dismissNotification()
+                pairSucceeded = true
+                showPairSuccessNotification()
                 val finalPort = connectPort ?: 5555
                 ui {
                     // 配对成功 → 把 App 拉到前台
@@ -455,6 +457,31 @@ class MainActivity : FlutterActivity() {
         nm.notify(NOTIF_ID, notif)
     }
 
+    /** 将通知更新为「正在配对中…」，无输入框，防止用户重复提交 */
+    private fun showPairingInProgressNotification() {
+        val nm = getSystemService(NotificationManager::class.java)
+        val notif = Notification.Builder(this, NOTIF_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("CableBee 正在配对…")
+            .setContentText("正在执行 adb pair，请稍候")
+            .setOngoing(true)
+            .build()
+        nm.notify(NOTIF_ID, notif)
+    }
+
+    /** 配对成功后显示「配对成功」通知，用户返回 App 后自动关闭 */
+    private fun showPairSuccessNotification() {
+        val nm = getSystemService(NotificationManager::class.java)
+        val notif = Notification.Builder(this, NOTIF_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("CableBee 配对成功 ✓")
+            .setContentText("已成功配对本机，返回 App 即可使用")
+            .setOngoing(false)
+            .setAutoCancel(true)
+            .build()
+        nm.notify(NOTIF_ID, notif)
+    }
+
     private fun dismissNotification() {
         getSystemService(NotificationManager::class.java).cancel(NOTIF_ID)
     }
@@ -489,6 +516,8 @@ class MainActivity : FlutterActivity() {
 
                     Log.i(TAG, "selfPair: got code=$code port=$port from notification (raw=$raw)")
                     if (port > 0 && code.isNotEmpty()) {
+                        // 立即把通知更新为「正在配对中…」，防止用户重复提交，也明确告知进度
+                        showPairingInProgressNotification()
                         executeSelfPair(port, code)
                     } else {
                         Log.w(TAG, "selfPair: invalid port=$port or empty code, ignoring")
@@ -792,7 +821,15 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    override fun onResume() { super.onResume(); intent?.let { onNewIntent(it) } }
+    override fun onResume() {
+        super.onResume()
+        intent?.let { onNewIntent(it) }
+        // 配对成功后用户返回 App，关闭成功通知
+        if (pairSucceeded) {
+            pairSucceeded = false
+            dismissNotification()
+        }
+    }
 
     override fun onDestroy() {
         runCatching { unregisterReceiver(pairCodeReceiver) }
