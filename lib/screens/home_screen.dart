@@ -666,17 +666,17 @@ class _SelfPairDialog extends StatelessWidget {
         // 步骤说明
         _StepRow(
           step: '1',
-          text: '点击「开始配对」，将自动跳转到系统无线调试设置页',
+          text: '点击「开始配对」，将自动跳转到系统无线调试设置页，同时通知栏会立即弹出配对输入框',
         ),
         const SizedBox(height: 10),
         _StepRow(
           step: '2',
-          text: '在系统页面点击「使用配对码配对」，配对弹窗出现后不要关闭',
+          text: '在系统页面点击「使用配对码配对」，等待配对码弹窗出现（不要关闭）',
         ),
         const SizedBox(height: 10),
         _StepRow(
           step: '3',
-          text: '下拉通知栏，在「CableBee 检测到配对服务」通知中输入配对码',
+          text: '下拉通知栏：若已自动检测到端口，只需输入配对码；否则同时输入端口号和配对码',
         ),
         const SizedBox(height: 10),
         _StepRow(
