@@ -425,7 +425,7 @@ class RemoteScreenState extends State<RemoteScreen>
       final scaleY = _devH / renderSize.width;
       return Offset(
         (renderSize.height - local.dy) * scaleX, // dy 翻转 → 设备 x
-        (renderSize.width  - local.dx) * scaleY, // dx 翻转 → 设备 y
+        local.dx * scaleY,                        // dx → 设备 y
       );
     }
     final scaleX = _devW / renderSize.width;
