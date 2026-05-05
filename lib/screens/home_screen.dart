@@ -600,24 +600,36 @@ class _PairDialog extends StatefulWidget {
 }
 
 class _PairDialogState extends State<_PairDialog> {
-  final _hostCtrl = TextEditingController();
-  final _portCtrl = TextEditingController();
-  final _codeCtrl = TextEditingController();
+  // 合并为两个输入框：配对码 + IP:端口（与原生 Android 无线调试弹窗格式一致）
+  final _codeCtrl    = TextEditingController();
+  final _addrCtrl    = TextEditingController(); // 格式: 10.0.0.6:43251
   bool _pairing = false;
   String? _result;
   bool _success = false;
 
   @override
   void dispose() {
-    _hostCtrl.dispose(); _portCtrl.dispose(); _codeCtrl.dispose();
+    _codeCtrl.dispose(); _addrCtrl.dispose();
     super.dispose();
   }
 
   Future<void> _pair() async {
-    final host = _hostCtrl.text.trim();
-    final port = int.tryParse(_portCtrl.text.trim()) ?? 0;
     final code = _codeCtrl.text.trim();
-    if (host.isEmpty || port == 0 || code.isEmpty) return;
+    final addr = _addrCtrl.text.trim(); // "10.0.0.6:43251"
+    if (code.isEmpty || addr.isEmpty) return;
+
+    // 解析 IP:端口
+    final colonIdx = addr.lastIndexOf(':');
+    if (colonIdx < 0) {
+      setState(() { _result = '请输入正确格式：IP地址:端口'; _success = false; });
+      return;
+    }
+    final host = addr.substring(0, colonIdx).trim();
+    final port = int.tryParse(addr.substring(colonIdx + 1).trim()) ?? 0;
+    if (host.isEmpty || port == 0) {
+      setState(() { _result = '请输入正确格式：IP地址:端口'; _success = false; });
+      return;
+    }
 
     setState(() { _pairing = true; _result = null; });
     final res = await context.read<AdbService>().pair(host, port, code);
@@ -647,28 +659,26 @@ class _PairDialogState extends State<_PairDialog> {
       )),
       content: Column(mainAxisSize: MainAxisSize.min, children: [
         const Text(
-          '在设备「开发者选项 → 无线调试 → 使用配对码配对」中获取 IP、端口和配对码',
+          '在设备「开发者选项 → 无线调试 → 使用配对码配对」中获取配对码和 IP:端口',
           style: TextStyle(
             fontFamily: 'JetBrainsMono', fontSize: 11, color: AppTheme.textMuted,
           ),
         ),
         const SizedBox(height: 16),
         TextField(
-          controller: _hostCtrl,
-          decoration: const InputDecoration(labelText: 'IP 地址'),
-          keyboardType: TextInputType.number,
-        ),
-        const SizedBox(height: 10),
-        TextField(
-          controller: _portCtrl,
-          decoration: const InputDecoration(labelText: '配对端口'),
-          keyboardType: TextInputType.number,
-        ),
-        const SizedBox(height: 10),
-        TextField(
           controller: _codeCtrl,
           decoration: const InputDecoration(labelText: '配对码'),
           keyboardType: TextInputType.number,
+          autofocus: true,
+        ),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _addrCtrl,
+          decoration: const InputDecoration(
+            labelText: 'IP 地址和端口',
+            hintText: '10.0.0.6:43251',
+          ),
+          keyboardType: TextInputType.url,
         ),
         if (_result != null) ...[
           const SizedBox(height: 12),
