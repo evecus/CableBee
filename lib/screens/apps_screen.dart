@@ -947,7 +947,9 @@ class AppsScreenState extends State<AppsScreen>
 
   Future<void> _downloadApk(AppInfoEx app) async {
     final prefs = await SharedPreferences.getInstance();
-    final saveDir = prefs.getString('local_save_path')!;
+    // 加默认值防止 null 崩溃
+    const defaultSaveDir = '/sdcard/Download/CableBee';
+    final saveDir = prefs.getString('local_save_path') ?? defaultSaveDir;
     await Directory(saveDir).create(recursive: true);
     final savePath = '$saveDir/${app.packageName}.apk';
 
@@ -956,12 +958,32 @@ class AppsScreenState extends State<AppsScreen>
       _busyPackage = app.packageName;
       _actionResult = '正在拉取 ${app.displayName} 的安装包...';
     });
-    final res = await adb.pull(app.apkPath, savePath);
+
+    // 部分应用 apkPath 可能是 split apk 或路径不准确
+    // 用 pm path 获取真实路径（取第一行 package: 后的路径）
+    String apkPath = app.apkPath;
+    final pmRes = await adb.shell('pm path ${app.packageName}');
+    if (pmRes.exitCode == 0) {
+      final line = pmRes.stdout.split('
+')
+          .firstWhere((l) => l.startsWith('package:'), orElse: () => '');
+      if (line.isNotEmpty) apkPath = line.replaceFirst('package:', '').trim();
+    }
+
+    final res = await adb.pull(apkPath, savePath);
+
+    // 拉取成功后触发媒体扫描，让系统文件管理器能看到
+    if (res.isSuccess) {
+      await adb.shell('am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE '
+          '-d file://$savePath 2>/dev/null || true');
+    }
+
     setState(() {
       _busyPackage = null;
       _actionResult = res.isSuccess
           ? '✓ 已保存到 $savePath'
-          : '✗ 下载失败: ${res.output}';
+          : '✗ 下载失败: ${res.output}
+APK路径: $apkPath';
     });
   }
 
