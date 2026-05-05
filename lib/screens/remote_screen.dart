@@ -401,9 +401,23 @@ class RemoteScreenState extends State<RemoteScreen>
     });
   }
 
+  // 设备是否横屏
+  bool get _devIsLandscape => _devW > _devH;
+
   // 将渲染坐标换算为设备坐标
+  // 横屏设备在竖屏手机上显示时，视图被旋转了90°，坐标也需要对应旋转映射
   Offset _toDev(Offset local, Size renderSize) {
-    // 始终按当前渲染宽高比线性映射，保证横屏设备横屏显示、竖屏设备竖屏显示。
+    if (_devIsLandscape) {
+      // 视图旋转了90°逆时针（手机竖持显示横屏内容）
+      // renderSize 是旋转后的显示区域（宽<高），但设备坐标系是横屏（宽>高）
+      // local.dx 对应设备 y 轴，local.dy 对应设备 x 轴（翻转）
+      final scaleX = _devW / renderSize.height;
+      final scaleY = _devH / renderSize.width;
+      return Offset(
+        (renderSize.height - local.dy) * scaleX, // 旋转后 dy -> 设备 x（需翻转）
+        local.dx * scaleY,                        // 旋转后 dx -> 设备 y
+      );
+    }
     final scaleX = _devW / renderSize.width;
     final scaleY = _devH / renderSize.height;
     return Offset(local.dx * scaleX, local.dy * scaleY);
@@ -575,9 +589,46 @@ class RemoteScreenState extends State<RemoteScreen>
       // 计算渲染尺寸（保持设备宽高比）
       final areaW = constraints.maxWidth;
       final areaH = constraints.maxHeight;
+
+      if (_devIsLandscape) {
+        // 横屏设备：将视图旋转90°后在竖屏手机上显示
+        // 旋转后设备的"显示宽高比"= devH/devW（竖向）
+        final devAspect = _devH / _devW;
+        final areaAspect = areaW / areaH;
+        double renderW, renderH;
+        if (devAspect > areaAspect) {
+          renderW = areaW;
+          renderH = areaW / devAspect;
+        } else {
+          renderH = areaH;
+          renderW = areaH * devAspect;
+        }
+        // renderSize 传给 _toDev 的是旋转后的显示尺寸（宽<高）
+        final listenerSize = Size(renderW, renderH);
+        return Center(
+          child: SizedBox(
+            width: renderW,
+            height: renderH,
+            child: Listener(
+              onPointerDown: (e) => _onPointerDown(e, listenerSize),
+              onPointerMove: (e) => _onPointerMove(e, listenerSize),
+              onPointerUp:   (e) => _onPointerUp(e,   listenerSize),
+              child: RotatedBox(
+                quarterTurns: 1, // 顺时针旋转90°，横屏内容变为竖向显示
+                child: SizedBox(
+                  width: renderH,  // 旋转前纹理的宽
+                  height: renderW, // 旋转前纹理的高
+                  child: Texture(textureId: tid),
+                ),
+              ),
+            ),
+          ),
+        );
+      }
+
+      // 竖屏设备：正常显示
       final devAspect = _devW / _devH;
       final areaAspect = areaW / areaH;
-
       double renderW, renderH;
       if (devAspect > areaAspect) {
         renderW = areaW;

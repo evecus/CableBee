@@ -237,14 +237,20 @@ class ScrcpySession(
 
     fun sendTouch(action: Int, pointerId: Long, x: Int, y: Int,
                   w: Int, h: Int, pressure: Float = 1f) {
-        val buf = ByteBuffer.allocate(28).order(ByteOrder.BIG_ENDIAN)
+        // v3.x InjectTouchEvent 格式（32字节）：
+        // type(1) + action(1) + pointerId(8) + x(4) + y(4)
+        // + screenW(2,unsigned) + screenH(2,unsigned)
+        // + pressure(2,u16 fixed-point) + actionButton(4) + buttons(4)
+        val buf = ByteBuffer.allocate(32).order(ByteOrder.BIG_ENDIAN)
         buf.put(TYPE_INJECT_TOUCH.toByte())
         buf.put(action.toByte())
         buf.putLong(pointerId)
         buf.putInt(x); buf.putInt(y)
-        buf.putShort((w and 0xFFFF).toShort()); buf.putShort((h and 0xFFFF).toShort())
-        buf.putShort((pressure * 65535).toInt().toShort())
-        buf.putInt(if (action == 0) 1 else 0)
+        buf.putShort((w and 0xFFFF).toShort())
+        buf.putShort((h and 0xFFFF).toShort())
+        buf.putShort((pressure * 65535).toInt().toShort()) // u16 fixed-point
+        buf.putInt(if (action == 0) 1 else 0)              // actionButton
+        buf.putInt(if (action == 0) 1 else 0)              // buttons
         sendControl(buf.array())
     }
 
