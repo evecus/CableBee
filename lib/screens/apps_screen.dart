@@ -964,8 +964,7 @@ class AppsScreenState extends State<AppsScreen>
     String apkPath = app.apkPath;
     final pmRes = await adb.shell('pm path ${app.packageName}');
     if (pmRes.exitCode == 0) {
-      final line = pmRes.stdout.split('
-')
+      final line = pmRes.stdout.split("\n")
           .firstWhere((l) => l.startsWith('package:'), orElse: () => '');
       if (line.isNotEmpty) apkPath = line.replaceFirst('package:', '').trim();
     }
