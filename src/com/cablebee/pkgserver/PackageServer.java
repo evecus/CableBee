@@ -75,18 +75,51 @@ class PackageServer {
 
     // ── dump all packages ─────────────────────────────────────────────────────
 
-    void dumpAll() throws Exception {
+    void dumpAll(String sortBy) throws Exception {
         List<String> packages = getAllPackageNames();
         System.err.println("====loading " + packages.size() + " packages====");
 
-        // Sort alphabetically for stable output order
-        java.util.Collections.sort(packages);
-
-        for (String pkg : packages) {
-            try {
-                dumpPackage(pkg);
-            } catch (Throwable t) {
-                emitError(pkg, t.getMessage());
+        if ("label".equals(sortBy)) {
+            // 按 label 排序：先采集所有 label，再排序后输出
+            // 用 LinkedHashMap 保持插入顺序
+            final java.util.Map<String, String> labelMap = new java.util.LinkedHashMap<>();
+            for (String pkg : packages) {
+                try {
+                    PackageInfo pi = getPackageInfoForPackage(pkg);
+                    if (pi == null || pi.applicationInfo == null) {
+                        labelMap.put(pkg, pkg);
+                        continue;
+                    }
+                    ApplicationInfo ai = pi.applicationInfo;
+                    String label = pkg;
+                    if (ai.sourceDir != null) {
+                        try {
+                            Resources res = buildResources(ai.sourceDir);
+                            label = loadLabel(ai, res);
+                        } catch (Throwable ignored) {}
+                    }
+                    labelMap.put(pkg, label.toLowerCase());
+                } catch (Throwable t) {
+                    labelMap.put(pkg, pkg);
+                }
+            }
+            // 按 label 排序包名列表
+            java.util.List<String> sorted = new java.util.ArrayList<>(packages);
+            java.util.Collections.sort(sorted, new java.util.Comparator<String>() {
+                public int compare(String a, String b) {
+                    String la = labelMap.containsKey(a) ? labelMap.get(a) : a;
+                    String lb = labelMap.containsKey(b) ? labelMap.get(b) : b;
+                    return la.compareTo(lb);
+                }
+            });
+            for (String pkg : sorted) {
+                try { dumpPackage(pkg); } catch (Throwable t) { emitError(pkg, t.getMessage()); }
+            }
+        } else {
+            // 默认按包名排序（快，直接排序后逐条输出）
+            java.util.Collections.sort(packages);
+            for (String pkg : packages) {
+                try { dumpPackage(pkg); } catch (Throwable t) { emitError(pkg, t.getMessage()); }
             }
         }
     }
