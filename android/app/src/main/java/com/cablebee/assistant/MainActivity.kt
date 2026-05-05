@@ -228,9 +228,9 @@ class MainActivity : FlutterActivity() {
                         Log.i(TAG, "selfPair: pairing resolved host=$hostAddr port=$port")
                         if (isLocalHost(hostAddr) && isPortListening(port)) {
                             discoveredPairPort = port
-                            Log.i(TAG, "selfPair: valid pairing port=$port, recorded (not updating notification to avoid disrupting user input)")
-                            // 不更新通知——用户可能正在输入，刷新会清空内容
-                            // discoveredPairPort 已记录，提交时会优先使用
+                            Log.i(TAG, "selfPair: valid pairing port=$port, updating notification (user now only needs to enter code)")
+                            // mDNS 发现端口 → 刷新通知，用户从「端口:配对码」简化为只输「配对码」
+                            ui { showPairCodeNotification() }
                         }
                     }
                 })
@@ -394,15 +394,17 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
-     * 发配对通知（始终显示端口+配对码两个输入框）。
-     * mDNS 若已发现端口，提交时会自动用 discoveredPairPort 覆盖用户填的端口。
+     * 发配对通知。
+     * discoveredPairPort <= 0 → 单框输入「端口:配对码」格式，如 39987:123456
+     * discoveredPairPort >  0 → 单框只输配对码（端口已由 mDNS 自动获取）
      */
     private fun showPairCodeNotification(port: Int = -1) {
         val nm = getSystemService(NotificationManager::class.java)
+        val portKnown = discoveredPairPort > 0
 
         val replyIntent = Intent(ACTION_PAIR_CODE).apply {
             setPackage(packageName)
-            putExtra(EXTRA_PORT, port)  // -1 或 mDNS 发现的端口（提交时用）
+            putExtra(EXTRA_PORT, if (portKnown) discoveredPairPort else -1)
         }
         val replyPi = PendingIntent.getBroadcast(
             this, NOTIF_REQ_REPLY, replyIntent,
@@ -412,16 +414,14 @@ class MainActivity : FlutterActivity() {
                 PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        // 始终两个输入框：端口 + 配对码
-        val portInput = RemoteInput.Builder(EXTRA_PORT_INPUT)
-            .setLabel("① 端口号（无线调试页面的数字，如 39987）")
-            .build()
-        val codeInput = RemoteInput.Builder(EXTRA_CODE)
-            .setLabel("② 配对码（6位数字，如 123456）")
+        // 始终单个输入框，避免 ColorOS 多 RemoteInput 不工作
+        val inputHint = if (portKnown) "配对码（6位数字，如 123456）"
+                        else "端口:配对码（如 39987:123456）"
+        val singleInput = RemoteInput.Builder(EXTRA_CODE)
+            .setLabel(inputHint)
             .build()
         val replyAction = Notification.Action.Builder(null, "输入配对码", replyPi)
-            .addRemoteInput(portInput)
-            .addRemoteInput(codeInput)
+            .addRemoteInput(singleInput)
             .build()
 
         val cancelIntent = Intent(ACTION_CANCEL_PAIR).setPackage(packageName)
@@ -434,12 +434,19 @@ class MainActivity : FlutterActivity() {
         )
         val cancelAction = Notification.Action.Builder(null, "取消", cancelPi).build()
 
+        val (title, bigText) = if (portKnown) {
+            "CableBee 配对本机（端口 $discoveredPairPort）" to
+            "已自动检测到端口 $discoveredPairPort\n点「输入配对码」，输入无线调试弹窗中的6位配对码即可"
+        } else {
+            "CableBee 配对本机" to
+            "点「输入配对码」，按格式输入：\n端口:配对码\n例如：39987:123456\n（端口和配对码均来自无线调试弹窗）"
+        }
+
         val notif = Notification.Builder(this, NOTIF_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle("CableBee 配对本机")
-            .setContentText("点「输入配对码」→ 先填端口号，再填配对码（均来自无线调试弹窗）")
-            .setStyle(Notification.BigTextStyle()
-                .bigText("点「输入配对码」按钮：\n第1步 输入端口号（无线调试弹窗右上角的数字）\n第2步 输入配对码（弹窗中间的6位数字）"))
+            .setContentTitle(title)
+            .setContentText(if (portKnown) "输入6位配对码" else "输入格式：端口:配对码")
+            .setStyle(Notification.BigTextStyle().bigText(bigText))
             .addAction(replyAction)
             .addAction(cancelAction)
             .setOngoing(true)
@@ -458,22 +465,35 @@ class MainActivity : FlutterActivity() {
         override fun onReceive(ctx: android.content.Context?, intent: Intent?) {
             when (intent?.action) {
                 ACTION_PAIR_CODE -> {
+                    val portFromIntent = intent.getIntExtra(EXTRA_PORT, -1)
                     val results = RemoteInput.getResultsFromIntent(intent)
-                    val code = results?.getCharSequence(EXTRA_CODE)?.toString()?.trim() ?: ""
+                    val raw = results?.getCharSequence(EXTRA_CODE)?.toString()?.trim() ?: ""
 
-                    // 端口优先级：mDNS 已发现 > 用户手动输入
-                    val port = if (discoveredPairPort > 0) {
-                        Log.i(TAG, "selfPair: using mDNS discovered port=$discoveredPairPort")
-                        discoveredPairPort
+                    // 解析输入：mDNS 已知端口时只输配对码；否则格式为「端口:配对码」
+                    val port: Int
+                    val code: String
+                    if (portFromIntent > 0) {
+                        // mDNS 发现了端口，直接用，raw 就是配对码
+                        port = portFromIntent
+                        code = raw
+                    } else if (raw.contains(":")) {
+                        // 用户输入了「端口:配对码」格式
+                        val parts = raw.split(":", limit = 2)
+                        port = parts[0].trim().toIntOrNull() ?: -1
+                        code = parts[1].trim()
                     } else {
-                        results?.getCharSequence(EXTRA_PORT_INPUT)?.toString()?.trim()?.toIntOrNull() ?: -1
+                        // 兜底：也尝试用 discoveredPairPort
+                        port = if (discoveredPairPort > 0) discoveredPairPort else -1
+                        code = raw
                     }
 
-                    Log.i(TAG, "selfPair: got code=$code port=$port from notification")
+                    Log.i(TAG, "selfPair: got code=$code port=$port from notification (raw=$raw)")
                     if (port > 0 && code.isNotEmpty()) {
                         executeSelfPair(port, code)
                     } else {
                         Log.w(TAG, "selfPair: invalid port=$port or empty code, ignoring")
+                        // 输入格式有误，更新通知提示用户重新输入
+                        ui { showPairCodeNotification() }
                     }
                 }
                 ACTION_CANCEL_PAIR -> {
