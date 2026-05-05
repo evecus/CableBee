@@ -1,8 +1,14 @@
 package com.cablebee.assistant
 
+import android.app.*
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.usb.UsbManager
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
+import android.os.Build
+import android.provider.Settings
+import androidx.annotation.RequiresApi
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -10,6 +16,9 @@ import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.*
 import android.util.Log
 import java.io.File
+import java.net.InetSocketAddress
+import java.net.NetworkInterface
+import java.net.ServerSocket
 import java.util.concurrent.TimeUnit
 
 private const val TAG = "CableBee"
@@ -23,16 +32,38 @@ class MainActivity : FlutterActivity() {
         private const val LOCAL_APPS_CHANNEL = "com.cablebee.assistant/local_apps"
         private const val SCRCPY_METHOD      = ScrcpyChannel.METHOD_CHANNEL
         private const val SCRCPY_EVENTS      = ScrcpyChannel.EVENT_CHANNEL
+
+        // 配对本机新增
+        private const val SELF_PAIR_EVENTS   = "com.cablebee/self_pair_events"
+        private const val NOTIF_CHANNEL_ID   = "cablebee_self_pair"
+        private const val NOTIF_ID           = 9001
+        private const val NOTIF_REQ_REPLY    = 9002
+        private const val NOTIF_REQ_CANCEL   = 9003
+        private const val ACTION_PAIR_CODE   = "com.cablebee.ACTION_PAIR_CODE"
+        private const val ACTION_CANCEL_PAIR = "com.cablebee.ACTION_CANCEL_PAIR"
+        private const val EXTRA_CODE         = "pair_code"
+        private const val EXTRA_PORT         = "pair_port"
+        private const val TLS_PAIRING_TYPE   = "_adb-tls-pairing._tcp"
+        private const val TLS_CONNECT_TYPE   = "_adb-tls-connect._tcp"
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var usbEventSink: EventChannel.EventSink? = null
+    private var selfPairEventSink: EventChannel.EventSink? = null
     private var scrcpyChannel: ScrcpyChannel? = null
 
     private lateinit var adbBin: File
     private lateinit var fastbootBin: File
 
     private val connectedSerials = mutableSetOf<String>()
+
+    // ── mDNS 配对本机状态 ─────────────────────────────────────────────────────
+    private var nsdManager: NsdManager? = null
+    private var pairingDiscoveryListener: NsdManager.DiscoveryListener? = null
+    private var connectDiscoveryListener: NsdManager.DiscoveryListener? = null
+    private var discoveredPairPort: Int = -1
+    private var discoveredConnectPort: Int = -1   // _adb-tls-connect 端口，adb connect 用这个
+    private var selfPairingActive = false
 
     // ── 初始化二进制路径 ──────────────────────────────────────────────────────
 
@@ -44,11 +75,7 @@ class MainActivity : FlutterActivity() {
         Log.i(TAG, "fastboot: ${fastbootBin.absolutePath} exists=${fastbootBin.exists()}")
     }
 
-    // ── 核心执行函数 ──────────────────────────────────────────────────────────
-    //
-    // 去掉 "-L tcp:5037"，不再依赖本地 adb server。
-    // adb 二进制直接以客户端模式运行，对每个命令建立独立连接。
-    // 彻底绕过 start-server/fork，解决 OPPO/一加 SELinux 限制。
+    // ── 核心 ADB 执行 ─────────────────────────────────────────────────────────
 
     private data class AdbResult(val exit: Int, val stdout: String, val stderr: String) {
         val isSuccess get() = exit == 0 || stdout.isNotEmpty()
@@ -133,13 +160,313 @@ class MainActivity : FlutterActivity() {
 
     private fun ui(block: () -> Unit) = mainExecutor.execute(block)
 
+    // ── mDNS 配对本机 ─────────────────────────────────────────────────────────
+
+    /** 检查端口是否真实有人在监听（绑定失败 = 端口被占用 = adbd 在此端口等待） */
+    private fun isPortListening(port: Int): Boolean = try {
+        ServerSocket().use {
+            it.bind(InetSocketAddress("127.0.0.1", port), 1)
+            false // 绑定成功说明没人用，端口无效
+        }
+    } catch (_: Exception) {
+        true // 绑定失败说明端口已被占用，即服务在监听
+    }
+
+    /** 判断 NsdServiceInfo 解析的 host 是否属于本机网络接口 */
+    private fun isLocalHost(hostAddress: String?): Boolean {
+        if (hostAddress == null) return false
+        if (hostAddress == "127.0.0.1") return true
+        return try {
+            NetworkInterface.getNetworkInterfaces()
+                ?.asSequence()
+                ?.flatMap { it.inetAddresses.asSequence() }
+                ?.any { it.hostAddress == hostAddress }
+                ?: false
+        } catch (_: Exception) { false }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.R)
+    private fun startSelfPairDiscovery() {
+        if (selfPairingActive) {
+            Log.i(TAG, "selfPair: already active, skip")
+            return
+        }
+        selfPairingActive = true
+        discoveredPairPort = -1
+        discoveredConnectPort = -1
+
+        ensureNotifChannel()
+        nsdManager = getSystemService(NsdManager::class.java)
+
+        // ── 监听配对端口 (_adb-tls-pairing._tcp) ─────────────────────────
+        val pairingListener = object : NsdManager.DiscoveryListener {
+            override fun onDiscoveryStarted(type: String) {
+                Log.i(TAG, "selfPair: pairing discovery started")
+            }
+            override fun onStartDiscoveryFailed(type: String, code: Int) {
+                Log.w(TAG, "selfPair: pairing discovery start failed code=$code")
+            }
+            override fun onDiscoveryStopped(type: String) {
+                Log.i(TAG, "selfPair: pairing discovery stopped")
+            }
+            override fun onStopDiscoveryFailed(type: String, code: Int) {
+                Log.w(TAG, "selfPair: pairing stop failed code=$code")
+            }
+            override fun onServiceFound(info: NsdServiceInfo) {
+                Log.i(TAG, "selfPair: pairing service found ${info.serviceName}")
+                nsdManager?.resolveService(info, object : NsdManager.ResolveListener {
+                    override fun onResolveFailed(i: NsdServiceInfo, code: Int) {
+                        Log.w(TAG, "selfPair: pairing resolve failed code=$code")
+                    }
+                    override fun onServiceResolved(resolved: NsdServiceInfo) {
+                        val hostAddr = resolved.host?.hostAddress
+                        val port = resolved.port
+                        Log.i(TAG, "selfPair: pairing resolved host=$hostAddr port=$port")
+                        if (isLocalHost(hostAddr) && isPortListening(port)) {
+                            discoveredPairPort = port
+                            Log.i(TAG, "selfPair: valid pairing port=$port, posting notification")
+                            ui { showPairCodeNotification(port) }
+                        }
+                    }
+                })
+            }
+            override fun onServiceLost(info: NsdServiceInfo) {
+                Log.i(TAG, "selfPair: pairing service lost")
+            }
+        }
+
+        // ── 同时监听连接端口 (_adb-tls-connect._tcp) ──────────────────────
+        // 无线调试开启后这个端口一直存在，pair 完成后直接用它 adb connect
+        val connectListener = object : NsdManager.DiscoveryListener {
+            override fun onDiscoveryStarted(type: String) {
+                Log.i(TAG, "selfPair: connect discovery started")
+            }
+            override fun onStartDiscoveryFailed(type: String, code: Int) {
+                Log.w(TAG, "selfPair: connect discovery start failed code=$code")
+            }
+            override fun onDiscoveryStopped(type: String) {
+                Log.i(TAG, "selfPair: connect discovery stopped")
+            }
+            override fun onStopDiscoveryFailed(type: String, code: Int) {
+                Log.w(TAG, "selfPair: connect stop failed code=$code")
+            }
+            override fun onServiceFound(info: NsdServiceInfo) {
+                Log.i(TAG, "selfPair: connect service found ${info.serviceName}")
+                nsdManager?.resolveService(info, object : NsdManager.ResolveListener {
+                    override fun onResolveFailed(i: NsdServiceInfo, code: Int) {
+                        Log.w(TAG, "selfPair: connect resolve failed code=$code")
+                    }
+                    override fun onServiceResolved(resolved: NsdServiceInfo) {
+                        val hostAddr = resolved.host?.hostAddress
+                        val port = resolved.port
+                        Log.i(TAG, "selfPair: connect resolved host=$hostAddr port=$port")
+                        if (isLocalHost(hostAddr) && isPortListening(port)) {
+                            discoveredConnectPort = port
+                            Log.i(TAG, "selfPair: valid connect port=$port (will use after pairing)")
+                        }
+                    }
+                })
+            }
+            override fun onServiceLost(info: NsdServiceInfo) {
+                Log.i(TAG, "selfPair: connect service lost")
+                if (discoveredConnectPort != -1) discoveredConnectPort = -1
+            }
+        }
+
+        pairingDiscoveryListener = pairingListener
+        connectDiscoveryListener = connectListener
+        nsdManager?.discoverServices(TLS_PAIRING_TYPE, NsdManager.PROTOCOL_DNS_SD, pairingListener)
+        nsdManager?.discoverServices(TLS_CONNECT_TYPE, NsdManager.PROTOCOL_DNS_SD, connectListener)
+
+        // 跳转系统开发者选项无线调试页
+        try {
+            val intent = Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                putExtra(":settings:fragment_args_key", "toggle_adb_wireless")
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.w(TAG, "selfPair: failed to open dev settings: ${e.message}")
+            try {
+                startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                })
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun stopSelfPairDiscovery() {
+        selfPairingActive = false
+        pairingDiscoveryListener?.let {
+            try { nsdManager?.stopServiceDiscovery(it) } catch (_: Exception) {}
+        }
+        pairingDiscoveryListener = null
+        connectDiscoveryListener?.let {
+            try { nsdManager?.stopServiceDiscovery(it) } catch (_: Exception) {}
+        }
+        connectDiscoveryListener = null
+    }
+
+    /** 用收到的配对码执行 adb pair，然后用已发现的 connect 端口通知 Flutter */
+    private fun executeSelfPair(port: Int, code: String) {
+        scope.launch {
+            Log.i(TAG, "selfPair: executing adb pair 127.0.0.1:$port code=$code")
+            val pairRes = adbPair("127.0.0.1", port, code, timeoutMs = 30_000)
+            val ok = pairRes.output.contains("Successfully", ignoreCase = true)
+            Log.i(TAG, "selfPair: pair result ok=$ok output=${pairRes.output}")
+
+            if (ok) {
+                // 优先用 mDNS 已发现的 connect 端口，没发现时降级用 adb devices 找
+                val connectPort = if (discoveredConnectPort > 0) {
+                    Log.i(TAG, "selfPair: using mDNS connect port=$discoveredConnectPort")
+                    discoveredConnectPort
+                } else {
+                    Log.w(TAG, "selfPair: connect port not yet discovered, falling back to adb devices")
+                    findConnectPortFromDevices()
+                }
+                stopSelfPairDiscovery()
+                dismissNotification()
+                ui {
+                    selfPairEventSink?.success(mapOf(
+                        "type" to "success",
+                        "message" to "配对成功",
+                        "connectPort" to (connectPort ?: 5555),
+                    ))
+                }
+            } else {
+                dismissNotification()
+                ui {
+                    selfPairEventSink?.success(mapOf(
+                        "type" to "error",
+                        "message" to pairRes.output.ifEmpty { "配对失败，请检查配对码" },
+                    ))
+                }
+            }
+        }
+    }
+
+    /**
+     * 降级方案：pair 成功后 adb devices 里找已授权的 127.0.0.1:xxx。
+     * 正常情况下 discoveredConnectPort 已由 mDNS 提前拿到，这个函数几乎用不到。
+     */
+    private fun findConnectPortFromDevices(): Int? {
+        // pair 刚完成，adbd 可能还没把新密钥加进 authorized_keys，稍等一下
+        Thread.sleep(1_000)
+        val r = adb("devices", timeoutMs = 5_000)
+        val line = r.stdout.lines().firstOrNull {
+            it.startsWith("127.0.0.1:") && it.contains("\tdevice")
+        }
+        return line?.substringBefore("\t")?.substringAfter(":")?.toIntOrNull()
+    }
+
+    // ── 通知 ──────────────────────────────────────────────────────────────────
+
+    private fun ensureNotifChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val nm = getSystemService(NotificationManager::class.java)
+            if (nm.getNotificationChannel(NOTIF_CHANNEL_ID) == null) {
+                val ch = NotificationChannel(
+                    NOTIF_CHANNEL_ID,
+                    "CableBee 配对本机",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "无线调试配对本机提示"
+                    setSound(null, null)
+                }
+                nm.createNotificationChannel(ch)
+            }
+        }
+    }
+
+    private fun showPairCodeNotification(port: Int) {
+        val nm = getSystemService(NotificationManager::class.java)
+
+        // RemoteInput：用户在通知栏直接输入配对码
+        val remoteInput = RemoteInput.Builder(EXTRA_CODE)
+            .setLabel("输入配对码")
+            .build()
+
+        val replyIntent = Intent(ACTION_PAIR_CODE).apply {
+            setPackage(packageName)
+            putExtra(EXTRA_PORT, port)
+        }
+        val replyPi = PendingIntent.getBroadcast(
+            this, NOTIF_REQ_REPLY, replyIntent,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+                PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            else
+                PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val replyAction = Notification.Action.Builder(
+            null, "输入配对码", replyPi
+        ).addRemoteInput(remoteInput).build()
+
+        val cancelIntent = Intent(ACTION_CANCEL_PAIR).setPackage(packageName)
+        val cancelPi = PendingIntent.getBroadcast(
+            this, NOTIF_REQ_CANCEL, cancelIntent,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+                PendingIntent.FLAG_IMMUTABLE
+            else
+                0
+        )
+        val cancelAction = Notification.Action.Builder(null, "取消", cancelPi).build()
+
+        val notif = Notification.Builder(this, NOTIF_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("CableBee 检测到配对服务")
+            .setContentText("请在下方输入无线调试弹窗中显示的配对码")
+            .addAction(replyAction)
+            .addAction(cancelAction)
+            .setOngoing(true)
+            .build()
+
+        nm.notify(NOTIF_ID, notif)
+    }
+
+    private fun dismissNotification() {
+        getSystemService(NotificationManager::class.java).cancel(NOTIF_ID)
+    }
+
+    // ── BroadcastReceiver（接收通知栏 RemoteInput 结果）─────────────────────
+
+    private val pairCodeReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(ctx: android.content.Context?, intent: Intent?) {
+            when (intent?.action) {
+                ACTION_PAIR_CODE -> {
+                    val port = intent.getIntExtra(EXTRA_PORT, -1)
+                    val results = RemoteInput.getResultsFromIntent(intent)
+                    val code = results?.getCharSequence(EXTRA_CODE)?.toString()?.trim() ?: ""
+                    Log.i(TAG, "selfPair: got code=$code port=$port from notification")
+                    if (port > 0 && code.isNotEmpty()) {
+                        executeSelfPair(port, code)
+                    }
+                }
+                ACTION_CANCEL_PAIR -> {
+                    Log.i(TAG, "selfPair: cancelled by user")
+                    stopSelfPairDiscovery()
+                    dismissNotification()
+                }
+            }
+        }
+    }
+
     // ── Flutter Engine 配置 ──────────────────────────────────────────────────
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
         initBinaries()
-        // 不再启动 adb server，直接用客户端模式
+
+        // 注册 BroadcastReceiver
+        val filter = android.content.IntentFilter().apply {
+            addAction(ACTION_PAIR_CODE)
+            addAction(ACTION_CANCEL_PAIR)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(pairCodeReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(pairCodeReceiver, filter)
+        }
 
         // ── USB ───────────────────────────────────────────────────────────
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, USB_CHANNEL)
@@ -172,6 +499,16 @@ class MainActivity : FlutterActivity() {
 
                     "getNativeLibraryDir" ->
                         result.success(applicationInfo.nativeLibraryDir)
+
+                    // ── 新增：启动配对本机流程 ─────────────────────────────
+                    "startSelfPair" -> {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            startSelfPairDiscovery()
+                            result.success(null)
+                        } else {
+                            result.error("UNSUPPORTED", "需要 Android 11 及以上", null)
+                        }
+                    }
 
                     // connect(host, port) → serial
                     "connect" -> {
@@ -317,18 +654,23 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
+        // ── SELF PAIR EVENTS ──────────────────────────────────────────────
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, SELF_PAIR_EVENTS)
+            .setStreamHandler(object : EventChannel.StreamHandler {
+                override fun onListen(a: Any?, s: EventChannel.EventSink?) { selfPairEventSink = s }
+                override fun onCancel(a: Any?) { selfPairEventSink = null }
+            })
+
         // ── LOCAL APPS ────────────────────────────────────────────────────
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, LOCAL_APPS_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
 
-                    // 返回本机已安装应用列表（包名、标签、APK路径，不含图标）
                     "getInstalledApps" -> {
                         scope.launch {
                             try {
                                 val pm = packageManager
                                 val packages = pm.getInstalledPackages(0)
-
                                 val appList = packages.mapNotNull { pkgInfo ->
                                     try {
                                         val appInfo = pkgInfo.applicationInfo ?: return@mapNotNull null
@@ -341,7 +683,6 @@ class MainActivity : FlutterActivity() {
                                         )
                                     } catch (_: Exception) { null }
                                 }
-
                                 ui { result.success(appList) }
                             } catch (e: Exception) {
                                 ui { result.error("GET_APPS_FAILED", e.message, null) }
@@ -349,7 +690,6 @@ class MainActivity : FlutterActivity() {
                         }
                     }
 
-                    // 将APK复制到 cacheDir，返回临时路径（用于权限受限路径）
                     "copyApkToTemp" -> {
                         val packageName = call.argument<String>("packageName")
                             ?: return@setMethodCallHandler result.error("BAD_ARG", "packageName required", null)
@@ -360,13 +700,11 @@ class MainActivity : FlutterActivity() {
                                 val srcFile = File(appInfo.sourceDir)
                                 val destDir = File(cacheDir, "apk_temp").also { it.mkdirs() }
                                 val destFile = File(destDir, "$packageName.apk")
-
                                 srcFile.inputStream().use { input ->
                                     destFile.outputStream().use { output ->
                                         input.copyTo(output)
                                     }
                                 }
-
                                 ui { result.success(destFile.absolutePath) }
                             } catch (e: Exception) {
                                 ui { result.error("COPY_APK_FAILED", e.message, null) }
@@ -378,7 +716,7 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
-        // ── SCRCPY ────────────────────────────────────────────────────────────
+        // ── SCRCPY ────────────────────────────────────────────────────────
         scrcpyChannel = ScrcpyChannel(
             textureRegistry = flutterEngine.renderer,
             scope           = scope,
@@ -400,10 +738,11 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onResume() { super.onResume(); intent?.let { onNewIntent(it) } }
+
     override fun onDestroy() {
-        scrcpyChannel?.let {
-            // stop 内部会自行 release textureEntry
-        }
+        runCatching { unregisterReceiver(pairCodeReceiver) }
+        stopSelfPairDiscovery()
+        dismissNotification()
         scope.cancel()
         super.onDestroy()
     }

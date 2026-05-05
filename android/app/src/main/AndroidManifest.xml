@@ -23,6 +23,9 @@
     <!-- USB Host - for connecting to other Android devices via USB -->
     <uses-feature android:name="android.hardware.usb.host" android:required="false"/>
 
+    <!-- 配对本机：发送通知（Android 13+ 需要运行时申请） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+
     <application
         android:label="CableBee"
         android:name="${applicationName}"

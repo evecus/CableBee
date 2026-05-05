@@ -1,6 +1,8 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import 'services/binary_manager.dart';
 import 'services/adb_service.dart';
@@ -77,6 +79,11 @@ class _InitGateState extends State<_InitGate> {
   }
 
   Future<void> _init() async {
+    // Android 13+ 需要运行时申请通知权限（配对本机通知栏用）
+    if (Platform.isAndroid) {
+      await Permission.notification.request();
+    }
+
     context.read<BinaryManager>().initialize();
     await Future.wait([
       context.read<AdbService>().startServer(),

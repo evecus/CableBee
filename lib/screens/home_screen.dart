@@ -41,8 +41,12 @@ class _HomeScreenState extends State<HomeScreen> {
   final _ipCtrl = TextEditingController();
   bool _connecting = false;
   String? _connectMsg;
-  String? _connectingIp; // 正在连接的历史设备 IP
+  String? _connectingIp;
   List<String> _history = [];
+
+  // ── 配对本机用的 EventChannel ──────────────────────────────────────────────
+  static const _selfPairChannel = EventChannel('com.cablebee/self_pair_events');
+  StreamSubscription? _selfPairSub;
 
   @override
   void initState() {
@@ -51,12 +55,45 @@ class _HomeScreenState extends State<HomeScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<AdbService>().refreshDevices();
     });
+    // 监听 Kotlin 推过来的配对本机事件（通知栏 RemoteInput 提交配对码后触发）
+    _selfPairSub = _selfPairChannel.receiveBroadcastStream().listen(_onSelfPairEvent);
   }
 
   @override
   void dispose() {
     _ipCtrl.dispose();
+    _selfPairSub?.cancel();
     super.dispose();
+  }
+
+  /// 收到 Kotlin 的自配对结果事件
+  /// event: {'type': 'success'|'error', 'message': String}
+  void _onSelfPairEvent(dynamic event) {
+    if (!mounted) return;
+    final map = Map<String, dynamic>.from(event as Map);
+    final type = map['type'] as String?;
+    final msg  = map['message'] as String? ?? '';
+
+    if (type == 'success') {
+      // 配对成功后自动以 127.0.0.1:port 连接
+      final port = map['connectPort'] as int?;
+      if (port != null) {
+        _connect(overrideIp: '127.0.0.1:$port');
+      } else {
+        context.read<AdbService>().refreshDevices();
+      }
+      _showSnack('配对成功！正在连接本机...', success: true);
+    } else if (type == 'error') {
+      _showSnack('配对失败：$msg', success: false);
+    }
+  }
+
+  void _showSnack(String msg, {required bool success}) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg, style: const TextStyle(fontFamily: 'JetBrainsMono', fontSize: 12)),
+      backgroundColor: success ? AppTheme.success : AppTheme.danger,
+      duration: const Duration(seconds: 3),
+    ));
   }
 
   Future<void> _loadHistory() async {
@@ -80,7 +117,6 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {});
   }
 
-  /// 统一连接逻辑：连接成功后只刷新已连接区域，不自动跳转
   Future<void> _connect({String? overrideIp}) async {
     final raw = (overrideIp ?? _ipCtrl.text).trim();
     if (raw.isEmpty) return;
@@ -106,19 +142,14 @@ class _HomeScreenState extends State<HomeScreen> {
 
     if (ok) {
       await _saveHistory('$host:$port');
-      // 连接成功：仅刷新列表，设备出现在"已连接"区域，不自动跳转
-      if (mounted) {
-        context.read<AdbService>().refreshDevices();
-      }
+      if (mounted) context.read<AdbService>().refreshDevices();
     }
   }
 
-  /// 断开指定设备
   Future<void> _disconnect(AdbDevice device) async {
     await context.read<AdbService>().disconnect(serial: device.serial);
   }
 
-  /// 进入 ADB 功能页
   void _openDevice(AdbDevice device) {
     context.read<AdbService>().selectDevice(device);
     Navigator.push(
@@ -127,6 +158,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // ── 普通无线配对弹窗（保留原功能）────────────────────────────────────────
   void _showPairDialog() {
     showDialog(
       context: context,
@@ -139,13 +171,36 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // ── 配对本机弹窗 ──────────────────────────────────────────────────────────
+  void _showSelfPairDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => _SelfPairDialog(
+        onStart: () {
+          Navigator.pop(ctx);
+          _startSelfPairing();
+        },
+      ),
+    );
+  }
+
+  /// 通知 Kotlin 启动 mDNS 监听 + 跳转开发者选项
+  static const _adbChannel = MethodChannel('com.cablebee/adb');
+
+  Future<void> _startSelfPairing() async {
+    try {
+      await _adbChannel.invokeMethod('startSelfPair');
+    } catch (e) {
+      _showSnack('启动配对失败：$e', success: false);
+    }
+  }
+
   void _showScanDialog() {
     showDialog(
       context: context,
       builder: (ctx) => _ScanDialog(
         onSelected: (ip) {
           Navigator.pop(ctx);
-          // 扫描弹窗选中设备：只填入输入框，等用户手动点连接按钮
           setState(() {
             _ipCtrl.text = ip;
             _connectMsg = null;
@@ -159,8 +214,6 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     final adb = context.watch<AdbService>();
     final connected = adb.devices;
-
-
 
     return Scaffold(
       backgroundColor: AppTheme.bg0,
@@ -183,6 +236,12 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ),
         actions: [
+          // ── 新增：配对本机入口（在无线配对左边）──────────────────────────
+          IconButton(
+            tooltip: '配对本机',
+            icon: const Icon(Icons.phonelink_rounded, size: 22, color: AppTheme.textSecondary),
+            onPressed: _showSelfPairDialog,
+          ),
           IconButton(
             tooltip: '无线配对',
             icon: const Icon(Icons.link_rounded, size: 22, color: AppTheme.textSecondary),
@@ -208,7 +267,6 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           const SizedBox(height: 32),
 
-          // ── Logo ──────────────────────────────────────────────────
           Center(
             child: Image.asset(
               'assets/bee_logo.png',
@@ -226,7 +284,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
           const SizedBox(height: 40),
 
-          // ── IP 输入框 ─────────────────────────────────────────────
           TextField(
             controller: _ipCtrl,
             keyboardType: TextInputType.number,
@@ -285,7 +342,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
           const SizedBox(height: 14),
 
-          // ── 扫描 + 连接按钮 ───────────────────────────────────────
           Row(children: [
             Expanded(
               child: OutlinedButton.icon(
@@ -333,7 +389,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
           const SizedBox(height: 32),
 
-          // ── 已连接设备 ────────────────────────────────────────────
           if (connected.isNotEmpty) ...[
             _SectionLabel(
               label: '已连接设备',
@@ -349,7 +404,6 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(height: 24),
           ],
 
-          // ── 历史设备 ──────────────────────────────────────────────
           if (_history.isNotEmpty) ...[
             _SectionLabel(label: '历史设备', count: _history.length),
             const SizedBox(height: 8),
@@ -409,7 +463,7 @@ class _SectionLabel extends StatelessWidget {
   }
 }
 
-// ── Connected Device Card（已连接，带断开按钮）────────────────────────────────
+// ── Connected Device Card ─────────────────────────────────────────────────────
 
 class _ConnectedDeviceCard extends StatelessWidget {
   final AdbDevice device;
@@ -437,7 +491,6 @@ class _ConnectedDeviceCard extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           child: Row(children: [
-            // 图标
             Container(
               width: 38, height: 38,
               decoration: BoxDecoration(
@@ -450,7 +503,6 @@ class _ConnectedDeviceCard extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 12),
-            // 文字
             Expanded(child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -465,7 +517,6 @@ class _ConnectedDeviceCard extends StatelessWidget {
                 )),
               ],
             )),
-            // 在线徽标
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
               decoration: BoxDecoration(
@@ -478,7 +529,6 @@ class _ConnectedDeviceCard extends StatelessWidget {
               )),
             ),
             const SizedBox(width: 4),
-            // 断开按钮
             IconButton(
               tooltip: '断开连接',
               icon: const Icon(Icons.link_off_rounded, size: 18, color: AppTheme.textMuted),
@@ -493,7 +543,7 @@ class _ConnectedDeviceCard extends StatelessWidget {
   }
 }
 
-// ── History / Generic Device Card ─────────────────────────────────────────────
+// ── Generic Device Card ───────────────────────────────────────────────────────
 
 class _DeviceCard extends StatelessWidget {
   final IconData icon;
@@ -590,7 +640,122 @@ class _DeviceCard extends StatelessWidget {
   }
 }
 
-// ── Pair Dialog ───────────────────────────────────────────────────────────────
+// ── Self Pair Dialog（配对本机）───────────────────────────────────────────────
+
+class _SelfPairDialog extends StatelessWidget {
+  final VoidCallback onStart;
+  const _SelfPairDialog({required this.onStart});
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: AppTheme.bg1,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: const BorderSide(color: AppTheme.bg3),
+      ),
+      title: const Row(children: [
+        Icon(Icons.phonelink_rounded, size: 18, color: AppTheme.primary),
+        SizedBox(width: 8),
+        Text('配对本机', style: TextStyle(
+          fontFamily: 'SpaceMono', fontSize: 15,
+          fontWeight: FontWeight.w700, color: AppTheme.textPrimary,
+        )),
+      ]),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        // 步骤说明
+        _StepRow(
+          step: '1',
+          text: '点击「开始配对」，将自动跳转到系统无线调试设置页',
+        ),
+        const SizedBox(height: 10),
+        _StepRow(
+          step: '2',
+          text: '在系统页面点击「使用配对码配对」，配对弹窗出现后不要关闭',
+        ),
+        const SizedBox(height: 10),
+        _StepRow(
+          step: '3',
+          text: '下拉通知栏，在「CableBee 检测到配对服务」通知中输入配对码',
+        ),
+        const SizedBox(height: 10),
+        _StepRow(
+          step: '4',
+          text: '配对成功后自动连接本机，无需任何额外操作',
+        ),
+        const SizedBox(height: 16),
+        Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: AppTheme.primary.withOpacity(0.06),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: AppTheme.primary.withOpacity(0.2)),
+          ),
+          child: const Row(children: [
+            Icon(Icons.info_outline_rounded, size: 13, color: AppTheme.primary),
+            SizedBox(width: 8),
+            Expanded(child: Text(
+              '需要 Android 11 及以上，且已开启无线调试',
+              style: TextStyle(
+                fontFamily: 'JetBrainsMono', fontSize: 11, color: AppTheme.primary,
+              ),
+            )),
+          ]),
+        ),
+      ]),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消', style: TextStyle(
+            fontFamily: 'SpaceMono', color: AppTheme.textSecondary,
+          )),
+        ),
+        FilledButton.icon(
+          onPressed: onStart,
+          icon: const Icon(Icons.play_arrow_rounded, size: 16),
+          label: const Text('开始配对'),
+          style: FilledButton.styleFrom(
+            backgroundColor: AppTheme.primary,
+            foregroundColor: AppTheme.bg0,
+            textStyle: const TextStyle(
+              fontFamily: 'SpaceMono', fontSize: 13, fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _StepRow extends StatelessWidget {
+  final String step;
+  final String text;
+  const _StepRow({required this.step, required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Container(
+        width: 20, height: 20,
+        decoration: BoxDecoration(
+          color: AppTheme.primary.withOpacity(0.15),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Center(child: Text(step, style: const TextStyle(
+          fontFamily: 'SpaceMono', fontSize: 11,
+          fontWeight: FontWeight.w700, color: AppTheme.primary,
+        ))),
+      ),
+      const SizedBox(width: 10),
+      Expanded(child: Text(text, style: const TextStyle(
+        fontFamily: 'JetBrainsMono', fontSize: 11, color: AppTheme.textSecondary,
+        height: 1.5,
+      ))),
+    ]);
+  }
+}
+
+// ── Pair Dialog（原有无线配对保留）───────────────────────────────────────────
 
 class _PairDialog extends StatefulWidget {
   final VoidCallback onPaired;
@@ -600,9 +765,8 @@ class _PairDialog extends StatefulWidget {
 }
 
 class _PairDialogState extends State<_PairDialog> {
-  // 合并为两个输入框：配对码 + IP:端口（与原生 Android 无线调试弹窗格式一致）
-  final _codeCtrl    = TextEditingController();
-  final _addrCtrl    = TextEditingController(); // 格式: 10.0.0.6:43251
+  final _codeCtrl = TextEditingController();
+  final _addrCtrl = TextEditingController();
   bool _pairing = false;
   String? _result;
   bool _success = false;
@@ -615,10 +779,9 @@ class _PairDialogState extends State<_PairDialog> {
 
   Future<void> _pair() async {
     final code = _codeCtrl.text.trim();
-    final addr = _addrCtrl.text.trim(); // "10.0.0.6:43251"
+    final addr = _addrCtrl.text.trim();
     if (code.isEmpty || addr.isEmpty) return;
 
-    // 解析 IP:端口
     final colonIdx = addr.lastIndexOf(':');
     if (colonIdx < 0) {
       setState(() { _result = '请输入正确格式：IP地址:端口'; _success = false; });
@@ -856,7 +1019,6 @@ class _ScanDialogState extends State<_ScanDialog> {
                   title: Text(_found[i], style: const TextStyle(
                     fontFamily: 'JetBrainsMono', fontSize: 13, color: AppTheme.textPrimary,
                   )),
-                  // 点击后关闭弹窗并发起连接，成功后显示在已连接区域
                   onTap: () => widget.onSelected(_found[i]),
                 ),
               ),
