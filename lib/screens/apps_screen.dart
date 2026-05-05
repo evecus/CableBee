@@ -1044,6 +1044,47 @@ class AppsScreenState extends State<AppsScreen>
   }
 
   // 选择本地 APK 文件安装
+  // 先将本机 APK push 到被控设备 /data/local/tmp/，再 pm install
+  // adb install 底层就是这个流程，直接传本机路径给 pm install 会失败
+  Future<void> _pushAndInstall(String localApkPath) async {
+    final fileName = localApkPath.split('/').last;
+    final remotePath = '/data/local/tmp/$fileName';
+    final adb = context.read<AdbService>();
+
+    setState(() {
+      _loading = true;
+      _actionResult = '正在推送 $fileName...';
+    });
+
+    // 1. push 到被控设备
+    final pushRes = await adb.push(localApkPath, remotePath);
+    if (!pushRes.isSuccess) {
+      setState(() {
+        _loading = false;
+        _actionResult = '✗ 推送失败: ${pushRes.stderr}';
+      });
+      return;
+    }
+
+    // 2. pm install
+    setState(() => _actionResult = '正在安装 $fileName...');
+    final installRes = await adb.shell(
+      'pm install -r "$remotePath"',
+      timeoutMs: 120000,
+    );
+
+    // 3. 清理临时文件
+    await adb.shell('rm -f "$remotePath" 2>/dev/null || true');
+
+    setState(() {
+      _loading = false;
+      _actionResult = installRes.isSuccess
+          ? '✓ 安装成功'
+          : '✗ 安装失败: ${installRes.output}';
+    });
+    if (installRes.isSuccess) _loadApps();
+  }
+
   Future<void> _installFromLocalFile() async {
     final results = await showLocalFilePicker(
       context,
@@ -1056,17 +1097,7 @@ class AppsScreenState extends State<AppsScreen>
       setState(() => _actionResult = '✗ 请选择 .apk 文件');
       return;
     }
-    setState(() {
-      _loading = true;
-      _actionResult = '正在安装 ${path.split('/').last}...';
-    });
-    final adb = context.read<AdbService>();
-    final res = await adb.installApk(path);
-    setState(() {
-      _loading = false;
-      _actionResult = res.output;
-    });
-    if (res.isSuccess) _loadApps();
+    await _pushAndInstall(path);
   }
 
   // 选择本机已安装应用，提取 APK 安装到被连接设备
@@ -1078,16 +1109,7 @@ class AppsScreenState extends State<AppsScreen>
       builder: (_) => const LocalAppsPicker(),
     );
     if (apkPath == null || !mounted) return;
-    setState(() {
-      _loading = true;
-      _actionResult = '正在安装 ${apkPath.split('/').last}...';
-    });
-    final adb = context.read<AdbService>();
-    final res = await adb.installApk(apkPath);
-    setState(() {
-      _loading = false;
-      _actionResult = res.output;
-    });
+    await _pushAndInstall(apkPath);
     if (res.isSuccess) _loadApps();
   }
 
