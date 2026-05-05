@@ -81,9 +81,9 @@ class PkgInfo {
 }
 
 class PkgServerService {
-  static const _assetPath    = 'assets/pkgserver.dex';
-  static const _preferredDex = '/data/local/tmp/pkgserver.dex';
-  static const _fallbackDex  = '/sdcard/pkgserver.dex';
+  static const _assetPath    = 'assets/pkgserver.apk';
+  static const _preferredDex = '/data/local/tmp/pkgserver.apk';
+  static const _fallbackDex  = '/sdcard/pkgserver.apk';
 
   final AdbService _adb;
   bool _deployed = false;
@@ -104,7 +104,7 @@ class PkgServerService {
     final androidData = dex.startsWith('/sdcard') ? 'ANDROID_DATA=/sdcard ' : '';
     final res = await _adb.shell(
         'CLASSPATH=$dex ${androidData}'
-        'app_process /system/bin '
+        'app_process ./ '
         'com.cablebee.pkgserver.Main '
         '"$packageName" 2>/dev/null');
     for (final line in res.stdout.split('\n')) {
@@ -130,7 +130,7 @@ class PkgServerService {
     final androidData = dex.startsWith('/sdcard') ? 'ANDROID_DATA=/sdcard ' : '';
     final res = await _adb.shell(
         'CLASSPATH=$dex ${androidData}'
-        'app_process /system/bin '
+        'app_process ./ '
         'com.cablebee.pkgserver.Main '
         '2>/dev/null',
         timeoutMs: 120000); // 2 min for large package lists

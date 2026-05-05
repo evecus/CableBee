@@ -39,5 +39,5 @@ flutter:
 
   assets:
     - assets/bee_logo.png
-    - assets/pkgserver.dex
+    - assets/pkgserver.apk
     - assets/scrcpy-server
