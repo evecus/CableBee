@@ -83,8 +83,11 @@ class RemoteScreenState extends State<RemoteScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused)  _stopSession();
-    if (state == AppLifecycleState.resumed && _connected) _connect();
+    // paused 时不停止 session（点击 NavBar 按键可能短暂触发 paused）
+    // 只在应用真正退到后台（inactive/hidden）超过一段时间才停止
+    if (state == AppLifecycleState.detached) _stopSession();
+    // resumed 时若 session 已断开则重连
+    if (state == AppLifecycleState.resumed && _connected && _textureId == null) _connect();
   }
 
   void _pushActions() {
