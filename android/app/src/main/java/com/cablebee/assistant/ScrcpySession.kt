@@ -75,7 +75,15 @@ class ScrcpySession(
     private fun _connect() {
         onEvent("status", mapOf("msg" to "连接中..."))
 
-        // ── 1. 连接 video socket（重试最多 30 次）────────────────────────────
+        // ── v3.x tunnel_forward 模式下，server 用同一个 LocalServerSocket 顺序 accept：
+        //    1st accept → video socket
+        //    2nd accept → control socket（audio=false 时跳过 audio）
+        //    accept 完成后 LocalServerSocket 立即关闭（try-with-resources）
+        //
+        // 因此必须在 LocalServerSocket 关闭前快速连好两个 socket，
+        // 再读握手头，不能先读完握手头再连 control。
+
+        // ── 1. 连接 video socket（重试最多 30 次等待 server 启动）────────────
         var attempt = 0
         while (attempt < 30 && running) {
             try {
@@ -91,9 +99,12 @@ class ScrcpySession(
         val vSock = videoSocket
             ?: throw IOException("无法连接 scrcpy server，请检查设备 ADB 授权")
 
-        // ── 2. 独立连接 control socket（v3.x 分离连接）──────────────────────
-        controlSocket = Socket("127.0.0.1", SCRCPY_PORT)
-        controlOut = controlSocket!!.getOutputStream()
+        // ── 2. 立即连接 control socket（必须在 LocalServerSocket 关闭前）─────
+        //    不能有任何 IO 操作（如读握手头）在两次 connect 之间
+        val cSock = Socket("127.0.0.1", SCRCPY_PORT)
+        controlSocket = cSock
+        controlOut = cSock.getOutputStream()
+        Log.i(TAG, "control socket connected")
 
         // ── 3. 读取握手头（v3.x）────────────────────────────────────────────
         // 格式：dummy(1) + deviceName(64) + codec_id(4) + width(4) + height(4) = 77 字节
