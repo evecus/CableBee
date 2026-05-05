@@ -286,7 +286,18 @@ class ScrcpySession(
     fun sendBackOrScreenOn() = sendControl(byteArrayOf(TYPE_BACK_OR_SCREEN.toByte()))
 
     private fun sendControl(data: ByteArray) {
-        try { controlOut?.write(data); controlOut?.flush() } catch (_: Exception) {}
+        val out = controlOut
+        if (out == null) {
+            Log.w(TAG, "sendControl: controlOut is null, dropping ${data.size}B")
+            return
+        }
+        try {
+            out.write(data)
+            out.flush()
+            Log.d(TAG, "sendControl: sent ${data.size}B, type=0x${data[0].toInt().and(0xFF).toString(16)}")
+        } catch (e: Exception) {
+            Log.e(TAG, "sendControl failed: ${e.message}")
+        }
     }
 
     // ── 停止 ─────────────────────────────────────────────────────────────────
