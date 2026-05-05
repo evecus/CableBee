@@ -22,10 +22,20 @@ public class Main {
     public static void main(String[] args) {
         try {
             PackageServer server = new PackageServer();
-            if (args.length >= 1) {
-                server.dumpPackage(args[0]);
+            // 解析参数：--sort=label 或 --sort=package，其余视为包名
+            String sortBy = "package"; // 默认按包名
+            String singlePkg = null;
+            for (String arg : args) {
+                if (arg.startsWith("--sort=")) {
+                    sortBy = arg.substring(7);
+                } else {
+                    singlePkg = arg;
+                }
+            }
+            if (singlePkg != null) {
+                server.dumpPackage(singlePkg);
             } else {
-                server.dumpAll();
+                server.dumpAll(sortBy);
             }
         } catch (Throwable t) {
             System.err.println("fatal: " + t.getMessage());
