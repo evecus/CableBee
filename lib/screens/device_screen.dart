@@ -55,6 +55,10 @@ class _DeviceScreenState extends State<DeviceScreen> {
   }
 
   void _switchTab(int i) {
+    // 离开投屏 tab 时自动断开投屏
+    if (_tab == 6 && i != 6) {
+      _remoteKey.currentState?.stopSession();
+    }
     setState(() {
       _tab = i;
       _tabActions = [];
