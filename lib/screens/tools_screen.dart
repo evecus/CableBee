@@ -44,7 +44,7 @@ class ToolsScreenState extends State<ToolsScreen>
   Future<void> _takeScreenshot() async {
     setState(() { _takingScreenshot = true; _resultMsg = null; });
     final prefs = await SharedPreferences.getInstance();
-    final saveDir = prefs.getString('local_save_path')!;
+    final saveDir = prefs.getString('local_save_path') ?? '/sdcard/Download/CableBee';
     await Directory(saveDir).create(recursive: true);
     final path = '$saveDir/screenshot_${DateTime.now().millisecondsSinceEpoch}.png';
     final res = await context.read<AdbService>().screenshot(path);
