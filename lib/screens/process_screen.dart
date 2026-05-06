@@ -75,7 +75,7 @@ class ProcessScreenState extends State<ProcessScreen>
     final adb = context.read<AdbService>();
     _pkgServer ??= PkgServerService(adb);
 
-    // 1. 先获取内存信息并立即显示
+    // 先获取内存信息并立即显示
     final memRes = await adb.shell(
         'cat /proc/meminfo | grep -E "^MemTotal:|^MemAvailable:"');
     int totalKb = 0, availKb = 0;
@@ -88,28 +88,39 @@ class ProcessScreenState extends State<ProcessScreen>
     }
     if (mounted) setState(() { _totalKb = totalKb; _usedKb = totalKb - availKb; });
 
-    // 2. 流式读取进程（ps -A 逐行输出，每收到一条立即显示）
+    // 获取进程列表（dumpsys meminfo 最可靠）
+    final procRes = await adb.shell(
+        r"dumpsys meminfo 2>/dev/null | grep -E '^\s+[0-9,]+K:' | "
+        r"sed 's/,//g; s/K://' | awk '{kb=$1; pkg=$2; if(pkg~/\(/)pkg=$2; print pkg, kb}' | "
+        "sort -rn -k2 | head -40");
+
     final procs = <_ProcInfo>[];
-    await for (final line in adb.shellStream(
-        'ps -A -o NAME,RSS 2>/dev/null | tail -n +2', timeoutMs: 30000)) {
+    for (final line in procRes.stdout.split('\n')) {
       final parts = line.trim().split(RegExp(r'\s+'));
       if (parts.length < 2) continue;
-      final kb = int.tryParse(parts.last) ?? 0;
-      final name = parts.first;
-      if (kb <= 0 || name.isEmpty) continue;
-      procs.add(_ProcInfo(pkg: name, kbRss: kb));
-      // 每5条刷新一次（ps输出很快，不需要每条都刷新）
-      if (procs.length % 5 == 0 && mounted) {
-        final sorted = [...procs]..sort((a, b) => b.kbRss.compareTo(a.kbRss));
-        setState(() => _procs = sorted.take(40).toList());
-      }
+      final pkg = parts[0].replaceAll(RegExp(r'[()]'), '').trim();
+      final kb  = int.tryParse(parts[1]) ?? 0;
+      if (kb <= 0 || pkg.isEmpty || pkg == '(pid') continue;
+      procs.add(_ProcInfo(pkg: pkg, kbRss: kb));
     }
 
-    // 全部读完，最终排序
-    if (mounted) {
+    if (procs.isEmpty) {
+      final psRes = await adb.shell(
+          'ps -A -o NAME,RSS 2>/dev/null | tail -n +2');
+      for (final line in psRes.stdout.split('\n')) {
+        final parts = line.trim().split(RegExp(r'\s+'));
+        if (parts.length < 2) continue;
+        final kb = int.tryParse(parts.last) ?? 0;
+        final name = parts.first;
+        if (kb <= 0 || name.isEmpty) continue;
+        procs.add(_ProcInfo(pkg: name, kbRss: kb));
+      }
       procs.sort((a, b) => b.kbRss.compareTo(a.kbRss));
+    }
+
+    if (mounted) {
       setState(() {
-        _procs = procs.take(40).toList();
+        _procs   = procs.take(40).toList();
         _loading = false;
       });
     }
