@@ -62,7 +62,6 @@ class RemoteScreenState extends State<RemoteScreen>
   int  _maxSize  = 1080;   // 最大边长
   int  _bitRate  = 8;      // Mbps
   int  _maxFps   = 30;
-  bool _fullScreen = false;
 
   // 触摸跟踪（用于多点）
   final Map<int, Offset> _pointers = {};
@@ -511,23 +510,7 @@ class RemoteScreenState extends State<RemoteScreen>
                   onSelect: (v) => setState(() => _maxFps = v),
                 ),
               ),
-              const Divider(height: 1),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                child: Row(children: [
-                  const Icon(Icons.fullscreen_rounded,
-                      size: 18, color: AppTheme.textMuted),
-                  const SizedBox(width: 12),
-                  const Expanded(child: Text('全屏显示', style: TextStyle(
-                    fontFamily: 'SpaceMono', fontSize: 13,
-                    color: AppTheme.textPrimary))),
-                  Switch(
-                    value: _fullScreen,
-                    activeColor: AppTheme.primary,
-                    onChanged: (v) => setState(() => _fullScreen = v),
-                  ),
-                ]),
-              ),
+
             ]),
           ),
 
@@ -664,8 +647,8 @@ class RemoteScreenState extends State<RemoteScreen>
     ]);
 
     return Scaffold(
-      backgroundColor: _fullScreen ? Colors.black : AppTheme.bg0,
-      body: _fullScreen ? SafeArea(child: body) : body,
+      backgroundColor: AppTheme.bg0,
+      body: body,
     );
   }
 
