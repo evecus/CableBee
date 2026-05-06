@@ -123,8 +123,8 @@ class AppsScreenState extends State<AppsScreen>
       );
       _apps.add(ex);
       _batchCount++;
-      if (_batchCount % 10 == 0) {
-        // 服务端已排好序，只需过滤，不用再sort
+      // 前50条每条刷新（让用户立即看到），之后每5条刷新一次（减少重建开销）
+      if (_batchCount <= 50 || _batchCount % 5 == 0) {
         final list = _apps.where((a) {
           if (a.isSystem && !_showSystem) return false;
           if (!a.isSystem && !_showThirdParty) return false;
