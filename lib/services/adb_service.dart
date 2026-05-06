@@ -325,7 +325,7 @@ class AdbService extends ChangeNotifier {
       'getprop ro.product.manufacturer; echo "$sep";'
       'getprop ro.board.platform; echo "$sep";'
       'getprop ro.product.cpu.abi; echo "$sep";'
-      'cat /proc/cpuinfo | grep -m1 "^processor" | wc -l; echo "$sep";'
+      'cat /proc/cpuinfo | grep "^processor" | wc -l; echo "$sep";'
       'wm size; echo "$sep";'
       'wm density; echo "$sep";'
       'cat /proc/meminfo | grep MemTotal; echo "$sep";'
