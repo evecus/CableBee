@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/adb_service.dart';
 import '../utils/theme.dart';
 import '../widgets/common.dart';
@@ -91,13 +92,39 @@ class RemoteScreenState extends State<RemoteScreen>
 
   void _pushActions() {
     widget.onActionsChanged?.call([
-      if (_connected)
+      if (_connected) ...[
+        IconButton(
+          icon: const Icon(Icons.screenshot_rounded, size: 20, color: AppTheme.textMuted),
+          tooltip: '截屏',
+          onPressed: _takeScreenshot,
+        ),
         TextButton(
           onPressed: _stopSession,
           child: const Text('断开',
               style: TextStyle(color: AppTheme.danger, fontFamily: 'SpaceMono', fontSize: 14)),
         ),
+      ],
     ]);
+  }
+
+  Future<void> _takeScreenshot() async {
+    final adb = context.read<AdbService>();
+    final prefs = await SharedPreferences.getInstance();
+    const defaultDir = '/sdcard/Download/CableBee';
+    final saveDir = prefs.getString('local_save_path') ?? defaultDir;
+    final path = '$saveDir/screenshot_${DateTime.now().millisecondsSinceEpoch}.png';
+    // 先在设备上截屏，再 pull 到本机
+    await adb.shell('mkdir -p $saveDir 2>/dev/null');
+    final res = await adb.screenshot(path);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(
+        res.isSuccess ? '✓ 截图已保存至 $path' : '✗ 截图失败',
+        style: const TextStyle(fontFamily: 'JetBrainsMono', fontSize: 12),
+      ),
+      duration: const Duration(seconds: 3),
+      backgroundColor: res.isSuccess ? AppTheme.primary : AppTheme.danger,
+    ));
   }
 
   // ── 连接 ──────────────────────────────────────────────────────────────────
@@ -330,6 +357,9 @@ class RemoteScreenState extends State<RemoteScreen>
     await Future.delayed(const Duration(milliseconds: 300));
     await _connect();
   }
+
+  /// 供外部（如 device_screen 切换 tab 时）调用断开投屏
+  Future<void> stopSession() => _stopSession();
 
   Future<void> _stopSession() async {
     _eventSub?.cancel();
