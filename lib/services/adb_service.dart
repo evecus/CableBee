@@ -19,6 +19,7 @@ const _shellStream = EventChannel('com.cablebee/shell_stream');
 class AdbService extends ChangeNotifier {
   List<AdbDevice> _devices        = [];
   AdbDevice?      _selectedDevice;
+  int             _missCount = 0;  // 连续找不到选中设备的次数
   bool            _serverRunning  = false;
   Timer?          _pollTimer;
 
@@ -65,12 +66,23 @@ class AdbService extends ChangeNotifier {
 
       _serverRunning = _devices.isNotEmpty;
 
-      // Keep selection valid
+      // Keep selection valid：连续 2 次找不到才判定断连
       if (_selectedDevice != null) {
         final match = _devices.where((d) => d.serial == _selectedDevice!.serial);
-        _selectedDevice = match.isNotEmpty ? match.first : null;
+        if (match.isNotEmpty) {
+          _selectedDevice = match.first;
+          _missCount = 0;
+        } else {
+          _missCount++;
+          if (_missCount < 2) {
+            // 第一次丢失，先保留选中状态，等下次轮询确认
+          } else {
+            _selectedDevice = null;
+            _missCount = 0;
+          }
+        }
       }
-      if (_selectedDevice == null && _devices.length == 1) {
+      if (_selectedDevice == null && _missCount == 0 && _devices.length == 1) {
         _selectedDevice = _devices.first;
       }
 
