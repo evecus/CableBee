@@ -1198,31 +1198,39 @@ class AppsScreenState extends State<AppsScreen>
           ]),
         ),
 
-        // 应用列表
+        // 加载中在顶部显示细进度条，不挡列表
+        if (_loading)
+          const LinearProgressIndicator(
+            minHeight: 2,
+            color: AppTheme.primary,
+            backgroundColor: Colors.transparent,
+          ),
+
+        // 应用列表（加载中也显示已收到的数据）
         Expanded(
-          child: _loading
-              ? const CbeeLoader(message: '加载应用列表...')
-              : _filtered.isEmpty
-                  ? EmptyState(
+          child: _filtered.isEmpty
+              ? _loading
+                  ? const CbeeLoader(message: '加载应用列表...')
+                  : EmptyState(
                       icon: Icons.apps_outage_rounded,
                       title: '暂无应用',
                       message: '当前过滤条件下没有匹配的应用',
                     )
-                  : ListView.separated(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
-                      itemCount: _filtered.length,
-                      separatorBuilder: (_, __) =>
-                          const Divider(height: 1, indent: 72),
-                      itemBuilder: (ctx, i) {
-                        final app = _filtered[i];
-                        final busy = _busyPackage == app.packageName;
-                        return _AppListTile(
-                          app: app,
-                          busy: busy,
-                          onTap: () => _showAppActions(app),
-                        );
-                      },
-                    ),
+              : ListView.separated(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  itemCount: _filtered.length,
+                  separatorBuilder: (_, __) =>
+                      const Divider(height: 1, indent: 72),
+                  itemBuilder: (ctx, i) {
+                    final app = _filtered[i];
+                    final busy = _busyPackage == app.packageName;
+                    return _AppListTile(
+                      app: app,
+                      busy: busy,
+                      onTap: () => _showAppActions(app),
+                    );
+                  },
+                ),
         ),
       ]),
       floatingActionButton: FloatingActionButton.extended(
