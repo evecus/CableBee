@@ -149,13 +149,22 @@ class AdbService extends ChangeNotifier {
 
   Stream<String> shellStream(String command, {int timeoutMs = 120000}) {
     if (!hasDevice) return const Stream.empty();
-    return _shellStream
+    // 用 StreamController 把广播流转为单订阅流，避免 await for 订阅晚导致丢数据
+    final controller = StreamController<String>();
+    final sub = _shellStream
         .receiveBroadcastStream({
           'serial':    _selectedDevice!.serial,
           'command':   command,
           'timeoutMs': timeoutMs,
         })
-        .map((e) => e as String);
+        .listen(
+          (e) => controller.add(e as String),
+          onError: controller.addError,
+          onDone:  controller.close,
+          cancelOnError: false,
+        );
+    controller.onCancel = () => sub.cancel();
+    return controller.stream;
   }
 
   // ── push / pull ───────────────────────────────────────────────────────────
