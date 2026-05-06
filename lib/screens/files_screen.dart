@@ -759,14 +759,6 @@ class _QuickEntryButtonState extends State<_QuickEntryButton> {
             iconColor: AppTheme.primary,
           ),
         ),
-        const PopupMenuItem(
-          value: '/data',
-          child: _MenuRow(
-            icon: Icons.storage_rounded,
-            label: '/data',
-            iconColor: AppTheme.warning,
-          ),
-        ),
         if (_mountedPaths.isNotEmpty) const PopupMenuDivider(),
         ..._mountedPaths.map((p) => PopupMenuItem(
               value: p,
