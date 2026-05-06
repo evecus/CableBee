@@ -66,26 +66,28 @@ jobs:
           echo "SIZE=$(wc -c < $OUT/classes.dex)" >> $GITHUB_ENV
 
       # ── Copy dex to Flutter assets ────────────────────────────────────────
-      - name: Copy to assets/pkgserver.dex
+      - name: Pack dex into assets/pkgserver.apk
         run: |
-          mkdir -p assets
-          cp out/classes.dex assets/pkgserver.dex  # 修复⑤：路径同步修改
-          echo "Copied pkgserver.dex (${{ env.SIZE }} bytes) to assets/"
+          mkdir -p assets out/apk
+          # 把 classes.dex 打成只含 dex 的 zip（扩展名 .apk），CLASSPATH 可直接加载
+          cp out/classes.dex out/apk/classes.dex
+          cd out/apk && zip -0 ../../assets/pkgserver.apk classes.dex
+          echo "Packed pkgserver.apk (${{ env.SIZE }} bytes) to assets/"
 
       # ── Commit back to repo ───────────────────────────────────────────────
-      - name: Commit pkgserver.dex
+      - name: Commit pkgserver.apk
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add assets/pkgserver.dex
+          git add assets/pkgserver.apk
 
           if git diff --cached --quiet; then
-            echo "pkgserver.dex unchanged, nothing to commit."
+            echo "pkgserver.apk unchanged, nothing to commit."
           else
-            git commit -m "chore: update pkgserver.dex (${{ env.SIZE }} bytes) [skip ci]"
+            git commit -m "chore: update pkgserver.apk (${{ env.SIZE }} bytes) [skip ci]"
             git push
-            echo "Committed and pushed assets/pkgserver.dex"
+            echo "Committed and pushed assets/pkgserver.apk"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -95,5 +97,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pkgserver-dex
-          path: assets/pkgserver.dex
+          path: assets/pkgserver.apk
           retention-days: 30
