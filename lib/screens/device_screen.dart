@@ -22,9 +22,10 @@ class DeviceScreen extends StatefulWidget {
   State<DeviceScreen> createState() => _DeviceScreenState();
 }
 
-class _DeviceScreenState extends State<DeviceScreen> {
+class _DeviceScreenState extends State<DeviceScreen> with WidgetsBindingObserver {
   int _tab = 0;
   List<Widget> _tabActions = [];
+  bool _disconnectHandled = false; // 防止重复弹窗
 
   final _infoKey       = GlobalKey<DeviceInfoScreenState>();
   final _shellKey      = GlobalKey<ShellScreenState>();
@@ -80,9 +81,88 @@ class _DeviceScreenState extends State<DeviceScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<AdbService>().selectDevice(widget.device);
     });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // App 回到前台时刷新设备状态，触发断连检测
+      context.read<AdbService>().refreshDevices();
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final adb = context.watch<AdbService>();
+    if (!_disconnectHandled && adb.selectedDevice == null && mounted) {
+      _disconnectHandled = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _remoteKey.currentState?.stopSession();
+        _showDisconnectDialog();
+      });
+    }
+    if (adb.selectedDevice != null) _disconnectHandled = false;
+  }
+
+  Future<void> _showDisconnectDialog() async {
+    final adb = context.read<AdbService>();
+    final choice = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppTheme.bg1,
+        title: const Text('设备已断开', style: TextStyle(
+          color: AppTheme.textPrimary, fontFamily: 'SpaceMono', fontSize: 15)),
+        content: Text('与 ${widget.device.serial} 的连接已中断',
+          style: const TextStyle(
+            color: AppTheme.textSecondary, fontFamily: 'JetBrainsMono', fontSize: 13)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'home'),
+            child: const Text('回到主页',
+              style: TextStyle(color: AppTheme.textMuted, fontFamily: 'SpaceMono')),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: AppTheme.primary),
+            onPressed: () => Navigator.pop(context, 'reconnect'),
+            child: const Text('重新连接',
+              style: TextStyle(fontFamily: 'SpaceMono')),
+          ),
+        ],
+      ),
+    );
+
+    if (!mounted) return;
+    if (choice == 'reconnect') {
+      _disconnectHandled = false;
+      if (widget.device.connectionType == ConnectionType.wifi) {
+        final parts = widget.device.serial.split(':');
+        final host = parts[0];
+        final port = parts.length > 1 ? (int.tryParse(parts[1]) ?? 5555) : 5555;
+        await adb.connect(host, port: port);
+        if (mounted) adb.selectDevice(widget.device);
+      } else {
+        await adb.refreshDevices();
+        if (mounted) {
+          final match = adb.devices.where((d) => d.serial == widget.device.serial);
+          if (match.isNotEmpty) adb.selectDevice(match.first);
+        }
+      }
+    } else {
+      if (mounted) Navigator.of(context).pop();
+    }
   }
 
   @override
