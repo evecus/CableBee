@@ -564,11 +564,7 @@ class MainActivity : FlutterActivity() {
             pendingFastbootArgs   = null
 
             if (granted && device != null && result != null && args != null) {
-                val usbManager = getSystemService(USB_SERVICE) as UsbManager
-                scope.launch {
-                    val (exitCode, output) = runFastbootCommand(usbManager, device, args)
-                    ui { result.success(mapOf("exitCode" to exitCode, "output" to output)) }
-                }
+                scope.launch { runFastbootWithDevice(device, args, result) }
             } else {
                 result?.error("USB_PERMISSION_DENIED", "用户拒绝了 USB 权限", null)
             }
@@ -628,10 +624,7 @@ class MainActivity : FlutterActivity() {
     ) {
         val usbManager = getSystemService(USB_SERVICE) as UsbManager
         if (usbManager.hasPermission(device)) {
-            scope.launch {
-                val (exitCode, output) = runFastbootCommand(usbManager, device, args)
-                ui { result.success(mapOf("exitCode" to exitCode, "output" to output)) }
-            }
+            scope.launch { runFastbootWithDevice(device, args, result) }
             return
         }
         // 存起来，等广播回调
@@ -654,47 +647,50 @@ class MainActivity : FlutterActivity() {
      * App 进程已持有 USB 权限，子进程通过继承的 /dev/bus/usb 访问权限找到设备。
      * 同时通过环境变量 ANDROID_SERIAL 锁定目标设备，避免多设备歧义。
      */
-    /**
-     * 在 App 进程内通过 FastbootSession 执行命令，完全不启动子进程。
-     * args 格式与 fastboot CLI 一致：["reboot"], ["flash", "boot", "/path/to/boot.img"] 等
-     */
-    private fun runFastbootCommand(
-        usbManager: UsbManager,
-        device:     UsbDevice,
-        args:       List<String>,
-    ): Pair<Int, String> {
-        val session = FastbootSession.open(usbManager, device)
-            ?: return Pair(1, "error: cannot open fastboot session (check USB interface)")
+    private fun runFastbootWithDevice(
+        device: UsbDevice,
+        args:   List<String>,
+        result: MethodChannel.Result,
+    ) {
+        val usbManager = getSystemService(USB_SERVICE) as UsbManager
+        // 必须先 openDevice，保持连接打开，让子进程能访问该设备节点
+        val connection = usbManager.openDevice(device)
+        if (connection == null) {
+            ui { result.error("USB_OPEN_FAILED", "无法打开 USB 设备", null) }
+            return
+        }
 
-        return try {
-            if (args.isEmpty()) {
-                session.runCommand("getvar:all")
-            } else when (args[0]) {
-                "flash" -> {
-                    if (args.size < 3) return Pair(1, "usage: flash <partition> <file>")
-                    session.flash(args[1], java.io.File(args[2]))
-                }
-                "getvar" -> {
-                    val variable = if (args.size >= 2) args[1] else "all"
-                    session.runCommand("getvar:$variable")
-                }
-                "erase"    -> session.runCommand("erase:${args.getOrElse(1) { "" }}")
-                "reboot"   -> {
-                    val target = args.getOrNull(1)
-                    when (target) {
-                        null, ""               -> session.runCommand("reboot")
-                        "bootloader"           -> session.runCommand("reboot-bootloader")
-                        "recovery"             -> session.runCommand("reboot-recovery")
-                        "fastboot", "fastbootd"-> session.runCommand("reboot-fastboot")
-                        else                   -> session.runCommand("reboot-$target")
-                    }
-                }
-                "flashing" -> session.runCommand("flashing ${args.drop(1).joinToString(" ")}")
-                "oem"      -> session.runCommand("oem ${args.drop(1).joinToString(" ")}")
-                else       -> session.runCommand(args.joinToString(" "))
-            }
+        try {
+            // Android 版 fastboot 支持 -s /dev/bus/usb/XXX/YYY 直接指定设备节点
+            val devicePath = device.deviceName  // e.g. /dev/bus/usb/001/002
+            val cmd = mutableListOf(fastbootBin.absolutePath, "-s", devicePath) + args
+            Log.d(TAG, "fastboot exec: ${cmd.joinToString(" ")}")
+
+            val proc = ProcessBuilder(cmd).apply {
+                environment()["HOME"]   = filesDir.absolutePath
+                environment()["TMPDIR"] = cacheDir.absolutePath
+            }.redirectErrorStream(true).start()
+
+            val outBuf = StringBuilder()
+            val reader = Thread {
+                try { outBuf.append(proc.inputStream.bufferedReader().readText()) }
+                catch (_: Exception) {}
+            }.also { it.isDaemon = true; it.start() }
+
+            val exited = proc.waitFor(30, TimeUnit.SECONDS)
+            if (!exited) proc.destroyForcibly()
+            reader.join(2_000)
+
+            val output   = outBuf.toString().trim()
+            val exitCode = if (exited) runCatching { proc.exitValue() }.getOrDefault(1) else 1
+            Log.d(TAG, "fastboot exit=$exitCode output=${output.take(200)}")
+
+            ui { result.success(mapOf("exitCode" to exitCode, "output" to output)) }
+        } catch (e: Exception) {
+            Log.e(TAG, "fastboot error: ${e.message}")
+            ui { result.error("FASTBOOT_ERROR", e.message, null) }
         } finally {
-            session.close()
+            connection.close()
         }
     }
 
@@ -744,44 +740,45 @@ class MainActivity : FlutterActivity() {
             })
 
         // ── FASTBOOT ──────────────────────────────────────────────────────
-        // 完全在 App 进程内实现 fastboot 协议（USB bulk transfer），
-        // 不再启动子进程，彻底解决 Android USB 权限无法传递给子进程的问题。
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, FASTBOOT_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
 
                     // run(args: List<String>) → {exitCode: Int, output: String}
+                    // 自动查找 fastboot 设备，请求 USB 权限后执行
                     "run" -> {
                         val args = call.argument<List<String>>("args")
-                            ?: return@setMethodCallHandler result.error("BAD_ARG", "args required", null)
+                           ?: run { result.error("BAD_ARG", "args required", null); return@setMethodCallHandler }
 
-                        val usbManager = getSystemService(USB_SERVICE) as UsbManager
+                        if (!fastbootBin.exists()) {
+                            result.error("BINARY_MISSING", "fastboot 二进制不存在: ${fastbootBin.absolutePath}", null)
+                            return@setMethodCallHandler
+                        }
+
                         val device = findFastbootDevice()
                         if (device == null) {
+                            // 没有设备直接返回错误，不执行命令
                             ui { result.success(mapOf("exitCode" to 1, "output" to "error: no devices/emulators found")) }
                             return@setMethodCallHandler
                         }
 
-                        if (!usbManager.hasPermission(device)) {
-                            requestFastbootPermissionAndRun(device, args, result)
-                            return@setMethodCallHandler
-                        }
-
-                        scope.launch {
-                            val (exitCode, output) = runFastbootCommand(usbManager, device, args)
-                            ui { result.success(mapOf("exitCode" to exitCode, "output" to output)) }
-                        }
+                        requestFastbootPermissionAndRun(device, args, result)
                     }
 
                     // getDevices() → {connected: Bool, serial: String?}
                     "getDevices" -> {
-                        val usbManager = getSystemService(USB_SERVICE) as UsbManager
+                        if (!fastbootBin.exists()) {
+                            result.success(mapOf("connected" to false, "serial" to null))
+                            return@setMethodCallHandler
+                        }
                         val device = findFastbootDevice()
                         if (device == null) {
                             result.success(mapOf("connected" to false, "serial" to null))
                             return@setMethodCallHandler
                         }
+                        val usbManager = getSystemService(USB_SERVICE) as UsbManager
                         if (!usbManager.hasPermission(device)) {
+                            // 找到设备但没权限：主动弹权限框，同时告知 UI 设备已发现
                             val pi = PendingIntent.getBroadcast(
                                 this@MainActivity, 0,
                                 Intent(ACTION_USB_PERMISSION).setPackage(packageName),
@@ -794,27 +791,37 @@ class MainActivity : FlutterActivity() {
                             result.success(mapOf("connected" to false, "serial" to null, "needsPermission" to true))
                             return@setMethodCallHandler
                         }
-                        // 用 getvar product 探活，比 fastboot devices 更可靠
+                        // 已有权限：用 fastboot devices 确认
                         scope.launch {
-                            val session = FastbootSession.open(usbManager, device)
-                            if (session == null) {
-                                ui { result.success(mapOf("connected" to false, "serial" to null)) }
-                                return@launch
-                            }
                             try {
-                                val (code, out) = session.runCommand("getvar:product")
-                                val serial = runCatching { device.serialNumber }.getOrNull()
-                                    ?: device.deviceName
-                                val connected = code == 0
-                                Log.i(TAG, "getDevices: connected=$connected serial=$serial out=$out")
+                                val connection = usbManager.openDevice(device)
+                                if (connection == null) {
+                                    ui { result.success(mapOf("connected" to false, "serial" to null)) }
+                                    return@launch
+                                }
+                                val devicePath = device.deviceName
+                                val cmd = mutableListOf(fastbootBin.absolutePath, "-s", devicePath, "devices")
+                                val proc = ProcessBuilder(cmd).apply {
+                                    environment()["HOME"]   = filesDir.absolutePath
+                                    environment()["TMPDIR"] = cacheDir.absolutePath
+                                    redirectErrorStream(true)
+                                }.start()
+                                val out = proc.inputStream.bufferedReader().readText().trim()
+                                proc.waitFor(8, TimeUnit.SECONDS)
+                                connection.close()
+                                Log.d(TAG, "fastboot devices output: $out")
+                                val connected = out.isNotEmpty() && out.contains("\t")
+                                val serial = if (connected) out.lines()
+                                    .firstOrNull { it.contains("\t") }
+                                    ?.substringBefore("\t")?.trim() else null
                                 ui { result.success(mapOf("connected" to connected, "serial" to serial)) }
-                            } finally {
-                                session.close()
+                            } catch (e: Exception) {
+                                ui { result.success(mapOf("connected" to false, "serial" to null)) }
                             }
                         }
                     }
 
-                    // diagnose() → List<Map>
+                    // diagnose() → List<Map> 返回所有 USB 设备及其接口参数，用于排查设备识别问题
                     "diagnose" -> {
                         val usbManager = getSystemService(USB_SERVICE) as UsbManager
                         val deviceList = usbManager.deviceList.values.map { device ->
@@ -828,11 +835,11 @@ class MainActivity : FlutterActivity() {
                                 )
                             }
                             mapOf(
-                                "name"          to device.deviceName,
-                                "vendorId"      to "0x${device.vendorId.toString(16).uppercase()}",
-                                "productId"     to "0x${device.productId.toString(16).uppercase()}",
+                                "name"        to device.deviceName,
+                                "vendorId"    to "0x${device.vendorId.toString(16).uppercase()}",
+                                "productId"   to "0x${device.productId.toString(16).uppercase()}",
                                 "hasPermission" to usbManager.hasPermission(device),
-                                "interfaces"    to ifaces,
+                                "interfaces"  to ifaces,
                             )
                         }
                         result.success(deviceList)
@@ -841,8 +848,8 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
-
-
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, ADB_CHANNEL)
+            .setMethodCallHandler { call, result ->
                 when (call.method) {
 
                     "getNativeLibraryDir" ->
@@ -860,7 +867,7 @@ class MainActivity : FlutterActivity() {
 
                     // connect(host, port) → serial
                     "connect" -> {
-                        val host   = call.argument<String>("host") ?: return@setMethodCallHandler result.error("BAD_ARG","host required",null)
+                        val host   = call.argument<String>("host")?: run { result.error("BAD_ARG","host required",null); return@setMethodCallHandler }
                         val port   = call.argument<Int>("port") ?: 5555
                         val serial = "$host:$port"
                         scope.launch {
@@ -901,7 +908,7 @@ class MainActivity : FlutterActivity() {
 
                     // disconnect(serial)
                     "disconnect" -> {
-                        val serial = call.argument<String>("serial") ?: return@setMethodCallHandler result.error("BAD_ARG","serial required",null)
+                        val serial = call.argument<String>("serial")?: run { result.error("BAD_ARG","serial required",null); return@setMethodCallHandler }
                         scope.launch {
                             connectedSerials.remove(serial)
                             adb("disconnect", serial, timeoutMs = 5_000)
@@ -928,8 +935,8 @@ class MainActivity : FlutterActivity() {
 
                     // shell(serial, command, timeoutMs) → stdout
                     "shell" -> {
-                        val serial  = call.argument<String>("serial")  ?: return@setMethodCallHandler result.error("BAD_ARG","serial required",null)
-                        val command = call.argument<String>("command") ?: return@setMethodCallHandler result.error("BAD_ARG","command required",null)
+                        val serial  = call.argument<String>("serial") ?: run { result.error("BAD_ARG","serial required",null); return@setMethodCallHandler }
+                        val command = call.argument<String>("command")?: run { result.error("BAD_ARG","command required",null); return@setMethodCallHandler }
                         val timeout = call.argument<Int>("timeoutMs")?.toLong() ?: 15_000L
                         scope.launch {
                             val r = adb("-s", serial, "shell", command, timeoutMs = timeout)
@@ -942,9 +949,9 @@ class MainActivity : FlutterActivity() {
 
                     // push(serial, localPath, remotePath)
                     "push" -> {
-                        val serial     = call.argument<String>("serial")     ?: return@setMethodCallHandler result.error("BAD_ARG","serial required",null)
-                        val localPath  = call.argument<String>("localPath")  ?: return@setMethodCallHandler result.error("BAD_ARG","localPath required",null)
-                        val remotePath = call.argument<String>("remotePath") ?: return@setMethodCallHandler result.error("BAD_ARG","remotePath required",null)
+                        val serial     = call.argument<String>("serial")    ?: run { result.error("BAD_ARG","serial required",null); return@setMethodCallHandler }
+                        val localPath  = call.argument<String>("localPath") ?: run { result.error("BAD_ARG","localPath required",null); return@setMethodCallHandler }
+                        val remotePath = call.argument<String>("remotePath")?: run { result.error("BAD_ARG","remotePath required",null); return@setMethodCallHandler }
                         scope.launch {
                             val r = adb("-s", serial, "push", localPath, remotePath, timeoutMs = 120_000)
                             ui {
@@ -956,9 +963,9 @@ class MainActivity : FlutterActivity() {
 
                     // pull(serial, remotePath, localPath)
                     "pull" -> {
-                        val serial     = call.argument<String>("serial")     ?: return@setMethodCallHandler result.error("BAD_ARG","serial required",null)
-                        val remotePath = call.argument<String>("remotePath") ?: return@setMethodCallHandler result.error("BAD_ARG","remotePath required",null)
-                        val localPath  = call.argument<String>("localPath")  ?: return@setMethodCallHandler result.error("BAD_ARG","localPath required",null)
+                        val serial     = call.argument<String>("serial")    ?: run { result.error("BAD_ARG","serial required",null); return@setMethodCallHandler }
+                        val remotePath = call.argument<String>("remotePath")?: run { result.error("BAD_ARG","remotePath required",null); return@setMethodCallHandler }
+                        val localPath  = call.argument<String>("localPath") ?: run { result.error("BAD_ARG","localPath required",null); return@setMethodCallHandler }
                         scope.launch {
                             val r = adb("-s", serial, "pull", remotePath, localPath, timeoutMs = 120_000)
                             ui {
@@ -970,9 +977,9 @@ class MainActivity : FlutterActivity() {
 
                     // pair(host, port, code) → String
                     "pair" -> {
-                        val host = call.argument<String>("host") ?: return@setMethodCallHandler result.error("BAD_ARG","host required",null)
-                        val port = call.argument<Int>("port")    ?: return@setMethodCallHandler result.error("BAD_ARG","port required",null)
-                        val code = call.argument<String>("code") ?: return@setMethodCallHandler result.error("BAD_ARG","code required",null)
+                        val host = call.argument<String>("host")?: run { result.error("BAD_ARG","host required",null); return@setMethodCallHandler }
+                        val port = call.argument<Int>("port")   ?: run { result.error("BAD_ARG","port required",null); return@setMethodCallHandler }
+                        val code = call.argument<String>("code")?: run { result.error("BAD_ARG","code required",null); return@setMethodCallHandler }
                         scope.launch {
                             try {
                                 val r = adbPair(host, port, code)
@@ -985,9 +992,9 @@ class MainActivity : FlutterActivity() {
 
                     // forward(serial, local, remote) → String
                     "forward" -> {
-                        val serial = call.argument<String>("serial") ?: return@setMethodCallHandler result.error("BAD_ARG","serial required",null)
-                        val local  = call.argument<String>("local")  ?: return@setMethodCallHandler result.error("BAD_ARG","local required",null)
-                        val remote = call.argument<String>("remote") ?: return@setMethodCallHandler result.error("BAD_ARG","remote required",null)
+                        val serial = call.argument<String>("serial")?: run { result.error("BAD_ARG","serial required",null); return@setMethodCallHandler }
+                        val local  = call.argument<String>("local") ?: run { result.error("BAD_ARG","local required",null); return@setMethodCallHandler }
+                        val remote = call.argument<String>("remote")?: run { result.error("BAD_ARG","remote required",null); return@setMethodCallHandler }
                         scope.launch {
                             adb("-s", serial, "forward", "--remove", local, timeoutMs = 5_000)
                             val r = adb("-s", serial, "forward", local, remote, timeoutMs = 5_000)
@@ -1083,7 +1090,7 @@ class MainActivity : FlutterActivity() {
 
                     "copyApkToTemp" -> {
                         val packageName = call.argument<String>("packageName")
-                            ?: return@setMethodCallHandler result.error("BAD_ARG", "packageName required", null)
+                           ?: run { result.error("BAD_ARG", "packageName required", null); return@setMethodCallHandler }
                         scope.launch {
                             try {
                                 val pm = packageManager
