@@ -573,25 +573,44 @@ class MainActivity : FlutterActivity() {
 
     /**
      * 找到处于 fastboot 模式的 USB 设备。
-     * Fastboot 接口特征：class=0xFF, subclass=0x42, protocol=0x03
-     * 部分 OEM（如小米）：class=0xFF, subclass=0x00, protocol=0x00
+     * 策略（宽松匹配，优先级从高到低）：
+     *  1. class=0xFF, subclass=0x42, protocol=0x03  （标准 fastboot）
+     *  2. class=0xFF, subclass=0x00, protocol=0x00  （部分 OEM fastboot）
+     *  3. class=0xFF, 任意 subclass/protocol         （Vendor Specific 兜底）
      */
     private fun findFastbootDevice(): UsbDevice? {
         val usbManager = getSystemService(USB_SERVICE) as UsbManager
+        var fallbackDevice: UsbDevice? = null
+
         for (device in usbManager.deviceList.values) {
+            Log.d(TAG, "USB scan: ${device.deviceName} vid=${device.vendorId} pid=${device.productId} ifaces=${device.interfaceCount}")
             for (i in 0 until device.interfaceCount) {
                 val iface = device.getInterface(i)
                 val cls  = iface.interfaceClass
                 val sub  = iface.interfaceSubclass
                 val prot = iface.interfaceProtocol
-                Log.d(TAG, "USB ${device.deviceName} iface[$i] class=$cls sub=$sub prot=$prot")
-                if (cls == 0xFF && ((sub == 0x42 && prot == 0x03) || (sub == 0x00 && prot == 0x00))) {
-                    Log.i(TAG, "fastboot device found: ${device.deviceName}")
+                Log.d(TAG, "  iface[$i] class=0x${cls.toString(16)} sub=0x${sub.toString(16)} prot=0x${prot.toString(16)}")
+
+                if (cls == 0xFF && sub == 0x42 && prot == 0x03) {
+                    Log.i(TAG, "fastboot device (standard): ${device.deviceName}")
                     return device
+                }
+                if (cls == 0xFF && sub == 0x00 && prot == 0x00) {
+                    Log.i(TAG, "fastboot device (OEM 0x00/0x00): ${device.deviceName}")
+                    return device
+                }
+                if (cls == 0xFF) {
+                    fallbackDevice = device
                 }
             }
         }
-        return null
+
+        if (fallbackDevice != null) {
+            Log.i(TAG, "fastboot device (fallback vendor-specific): ${fallbackDevice.deviceName}")
+        } else {
+            Log.i(TAG, "no fastboot device found")
+        }
+        return fallbackDevice
     }
 
     /**
@@ -741,25 +760,8 @@ class MainActivity : FlutterActivity() {
 
                         val device = findFastbootDevice()
                         if (device == null) {
-                            // 没找到设备时，直接跑不带 -d 的命令（fallback，输出 fastboot devices 等）
-                            scope.launch {
-                                try {
-                                    val cmd = mutableListOf(fastbootBin.absolutePath) + args
-                                    Log.d(TAG, "fastboot (no device) exec: ${cmd.joinToString(" ")}")
-                                    val proc = ProcessBuilder(cmd).apply {
-                                        environment()["HOME"]   = filesDir.absolutePath
-                                        environment()["TMPDIR"] = cacheDir.absolutePath
-                                        redirectErrorStream(true)
-                                    }.start()
-                                    val out = proc.inputStream.bufferedReader().readText().trim()
-                                    val exited = proc.waitFor(10, TimeUnit.SECONDS)
-                                    if (!exited) proc.destroyForcibly()
-                                    val exit = if (exited) runCatching { proc.exitValue() }.getOrDefault(1) else 1
-                                    ui { result.success(mapOf("exitCode" to exit, "output" to out)) }
-                                } catch (e: Exception) {
-                                    ui { result.error("FASTBOOT_ERROR", e.message, null) }
-                                }
-                            }
+                            // 没有设备直接返回错误，不执行命令
+                            ui { result.success(mapOf("exitCode" to 1, "output" to "error: no devices/emulators found")) }
                             return@setMethodCallHandler
                         }
 
@@ -779,7 +781,16 @@ class MainActivity : FlutterActivity() {
                         }
                         val usbManager = getSystemService(USB_SERVICE) as UsbManager
                         if (!usbManager.hasPermission(device)) {
-                            // 有设备但没有权限，先报告已找到设备（连接中），让 UI 弹权限
+                            // 找到设备但没权限：主动弹权限框，同时告知 UI 设备已发现
+                            val pi = PendingIntent.getBroadcast(
+                                this@MainActivity, 0,
+                                Intent(ACTION_USB_PERMISSION).setPackage(packageName),
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+                                    PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                                else
+                                    PendingIntent.FLAG_UPDATE_CURRENT
+                            )
+                            usbManager.requestPermission(device, pi)
                             result.success(mapOf("connected" to false, "serial" to null, "needsPermission" to true))
                             return@setMethodCallHandler
                         }
