@@ -623,9 +623,10 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
-     * 打开 USB 设备，通过文件描述符传给 fastboot 二进制：
-     *   fastboot -d <fd> <args...>
-     * 这样 fastboot 进程继承已授权的文件描述符，绕过 Android 沙箱限制。
+     * 已取得 USB 权限后直接执行 fastboot。
+     * 不使用 -d <fd>（Android 版 fastboot 不支持该选项）。
+     * App 进程已持有 USB 权限，子进程通过继承的 /dev/bus/usb 访问权限找到设备。
+     * 同时通过环境变量 ANDROID_SERIAL 锁定目标设备，避免多设备歧义。
      */
     private fun runFastbootWithDevice(
         device: UsbDevice,
@@ -633,26 +634,25 @@ class MainActivity : FlutterActivity() {
         result: MethodChannel.Result,
     ) {
         val usbManager = getSystemService(USB_SERVICE) as UsbManager
+        // 必须先 openDevice，保持连接打开，让子进程能访问该设备节点
         val connection = usbManager.openDevice(device)
         if (connection == null) {
             ui { result.error("USB_OPEN_FAILED", "无法打开 USB 设备", null) }
             return
         }
-        val fd = connection.fileDescriptor
-        if (fd < 0) {
-            connection.close()
-            ui { result.error("USB_FD_INVALID", "获取文件描述符失败", null) }
-            return
-        }
 
         try {
-            val cmd = mutableListOf(fastbootBin.absolutePath, "-d", fd.toString()) + args
+            val cmd = mutableListOf(fastbootBin.absolutePath) + args
             Log.d(TAG, "fastboot exec: ${cmd.joinToString(" ")}")
 
             val proc = ProcessBuilder(cmd).apply {
-                environment()["HOME"]   = filesDir.absolutePath
-                environment()["TMPDIR"] = cacheDir.absolutePath
-                // 让子进程继承 fd：ProcessBuilder 默认继承所有 fd
+                environment()["HOME"]            = filesDir.absolutePath
+                environment()["TMPDIR"]          = cacheDir.absolutePath
+                // 锁定设备序列号（fastboot 通过 USB 序列号匹配）
+                val serial = runCatching { device.serialNumber }.getOrNull()
+                if (!serial.isNullOrEmpty()) {
+                    environment()["ANDROID_SERIAL"] = serial
+                }
             }.redirectErrorStream(true).start()
 
             val outBuf = StringBuilder()
@@ -791,8 +791,7 @@ class MainActivity : FlutterActivity() {
                                     ui { result.success(mapOf("connected" to false, "serial" to null)) }
                                     return@launch
                                 }
-                                val fd = connection.fileDescriptor
-                                val cmd = listOf(fastbootBin.absolutePath, "-d", fd.toString(), "devices")
+                                val cmd = mutableListOf(fastbootBin.absolutePath, "devices")
                                 val proc = ProcessBuilder(cmd).apply {
                                     environment()["HOME"]   = filesDir.absolutePath
                                     environment()["TMPDIR"] = cacheDir.absolutePath
