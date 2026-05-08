@@ -564,7 +564,11 @@ class MainActivity : FlutterActivity() {
             pendingFastbootArgs   = null
 
             if (granted && device != null && result != null && args != null) {
-                scope.launch { runFastbootWithDevice(device, args, result) }
+                val usbManager = getSystemService(USB_SERVICE) as UsbManager
+                scope.launch {
+                    val (exitCode, output) = runFastbootCommand(usbManager, device, args)
+                    ui { result.success(mapOf("exitCode" to exitCode, "output" to output)) }
+                }
             } else {
                 result?.error("USB_PERMISSION_DENIED", "用户拒绝了 USB 权限", null)
             }
@@ -624,7 +628,10 @@ class MainActivity : FlutterActivity() {
     ) {
         val usbManager = getSystemService(USB_SERVICE) as UsbManager
         if (usbManager.hasPermission(device)) {
-            scope.launch { runFastbootWithDevice(device, args, result) }
+            scope.launch {
+                val (exitCode, output) = runFastbootCommand(usbManager, device, args)
+                ui { result.success(mapOf("exitCode" to exitCode, "output" to output)) }
+            }
             return
         }
         // 存起来，等广播回调
@@ -647,50 +654,47 @@ class MainActivity : FlutterActivity() {
      * App 进程已持有 USB 权限，子进程通过继承的 /dev/bus/usb 访问权限找到设备。
      * 同时通过环境变量 ANDROID_SERIAL 锁定目标设备，避免多设备歧义。
      */
-    private fun runFastbootWithDevice(
-        device: UsbDevice,
-        args:   List<String>,
-        result: MethodChannel.Result,
-    ) {
-        val usbManager = getSystemService(USB_SERVICE) as UsbManager
-        // 必须先 openDevice，保持连接打开，让子进程能访问该设备节点
-        val connection = usbManager.openDevice(device)
-        if (connection == null) {
-            ui { result.error("USB_OPEN_FAILED", "无法打开 USB 设备", null) }
-            return
-        }
+    /**
+     * 在 App 进程内通过 FastbootSession 执行命令，完全不启动子进程。
+     * args 格式与 fastboot CLI 一致：["reboot"], ["flash", "boot", "/path/to/boot.img"] 等
+     */
+    private fun runFastbootCommand(
+        usbManager: UsbManager,
+        device:     UsbDevice,
+        args:       List<String>,
+    ): Pair<Int, String> {
+        val session = FastbootSession.open(usbManager, device)
+            ?: return Pair(1, "error: cannot open fastboot session (check USB interface)")
 
-        try {
-            // Android 版 fastboot 支持 -s /dev/bus/usb/XXX/YYY 直接指定设备节点
-            val devicePath = device.deviceName  // e.g. /dev/bus/usb/001/002
-            val cmd = mutableListOf(fastbootBin.absolutePath, "-s", devicePath) + args
-            Log.d(TAG, "fastboot exec: ${cmd.joinToString(" ")}")
-
-            val proc = ProcessBuilder(cmd).apply {
-                environment()["HOME"]   = filesDir.absolutePath
-                environment()["TMPDIR"] = cacheDir.absolutePath
-            }.redirectErrorStream(true).start()
-
-            val outBuf = StringBuilder()
-            val reader = Thread {
-                try { outBuf.append(proc.inputStream.bufferedReader().readText()) }
-                catch (_: Exception) {}
-            }.also { it.isDaemon = true; it.start() }
-
-            val exited = proc.waitFor(30, TimeUnit.SECONDS)
-            if (!exited) proc.destroyForcibly()
-            reader.join(2_000)
-
-            val output   = outBuf.toString().trim()
-            val exitCode = if (exited) runCatching { proc.exitValue() }.getOrDefault(1) else 1
-            Log.d(TAG, "fastboot exit=$exitCode output=${output.take(200)}")
-
-            ui { result.success(mapOf("exitCode" to exitCode, "output" to output)) }
-        } catch (e: Exception) {
-            Log.e(TAG, "fastboot error: ${e.message}")
-            ui { result.error("FASTBOOT_ERROR", e.message, null) }
+        return try {
+            if (args.isEmpty()) {
+                session.runCommand("getvar:all")
+            } else when (args[0]) {
+                "flash" -> {
+                    if (args.size < 3) return Pair(1, "usage: flash <partition> <file>")
+                    session.flash(args[1], java.io.File(args[2]))
+                }
+                "getvar" -> {
+                    val variable = if (args.size >= 2) args[1] else "all"
+                    session.runCommand("getvar:$variable")
+                }
+                "erase"    -> session.runCommand("erase:${args.getOrElse(1) { "" }}")
+                "reboot"   -> {
+                    val target = args.getOrNull(1)
+                    when (target) {
+                        null, ""               -> session.runCommand("reboot")
+                        "bootloader"           -> session.runCommand("reboot-bootloader")
+                        "recovery"             -> session.runCommand("reboot-recovery")
+                        "fastboot", "fastbootd"-> session.runCommand("reboot-fastboot")
+                        else                   -> session.runCommand("reboot-$target")
+                    }
+                }
+                "flashing" -> session.runCommand("flashing ${args.drop(1).joinToString(" ")}")
+                "oem"      -> session.runCommand("oem ${args.drop(1).joinToString(" ")}")
+                else       -> session.runCommand(args.joinToString(" "))
+            }
         } finally {
-            connection.close()
+            session.close()
         }
     }
 
@@ -740,45 +744,44 @@ class MainActivity : FlutterActivity() {
             })
 
         // ── FASTBOOT ──────────────────────────────────────────────────────
+        // 完全在 App 进程内实现 fastboot 协议（USB bulk transfer），
+        // 不再启动子进程，彻底解决 Android USB 权限无法传递给子进程的问题。
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, FASTBOOT_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
 
                     // run(args: List<String>) → {exitCode: Int, output: String}
-                    // 自动查找 fastboot 设备，请求 USB 权限后执行
                     "run" -> {
                         val args = call.argument<List<String>>("args")
                             ?: return@setMethodCallHandler result.error("BAD_ARG", "args required", null)
 
-                        if (!fastbootBin.exists()) {
-                            result.error("BINARY_MISSING", "fastboot 二进制不存在: ${fastbootBin.absolutePath}", null)
-                            return@setMethodCallHandler
-                        }
-
+                        val usbManager = getSystemService(USB_SERVICE) as UsbManager
                         val device = findFastbootDevice()
                         if (device == null) {
-                            // 没有设备直接返回错误，不执行命令
                             ui { result.success(mapOf("exitCode" to 1, "output" to "error: no devices/emulators found")) }
                             return@setMethodCallHandler
                         }
 
-                        requestFastbootPermissionAndRun(device, args, result)
+                        if (!usbManager.hasPermission(device)) {
+                            requestFastbootPermissionAndRun(device, args, result)
+                            return@setMethodCallHandler
+                        }
+
+                        scope.launch {
+                            val (exitCode, output) = runFastbootCommand(usbManager, device, args)
+                            ui { result.success(mapOf("exitCode" to exitCode, "output" to output)) }
+                        }
                     }
 
                     // getDevices() → {connected: Bool, serial: String?}
                     "getDevices" -> {
-                        if (!fastbootBin.exists()) {
-                            result.success(mapOf("connected" to false, "serial" to null))
-                            return@setMethodCallHandler
-                        }
+                        val usbManager = getSystemService(USB_SERVICE) as UsbManager
                         val device = findFastbootDevice()
                         if (device == null) {
                             result.success(mapOf("connected" to false, "serial" to null))
                             return@setMethodCallHandler
                         }
-                        val usbManager = getSystemService(USB_SERVICE) as UsbManager
                         if (!usbManager.hasPermission(device)) {
-                            // 找到设备但没权限：主动弹权限框，同时告知 UI 设备已发现
                             val pi = PendingIntent.getBroadcast(
                                 this@MainActivity, 0,
                                 Intent(ACTION_USB_PERMISSION).setPackage(packageName),
@@ -791,37 +794,27 @@ class MainActivity : FlutterActivity() {
                             result.success(mapOf("connected" to false, "serial" to null, "needsPermission" to true))
                             return@setMethodCallHandler
                         }
-                        // 已有权限：用 fastboot devices 确认
+                        // 用 getvar product 探活，比 fastboot devices 更可靠
                         scope.launch {
-                            try {
-                                val connection = usbManager.openDevice(device)
-                                if (connection == null) {
-                                    ui { result.success(mapOf("connected" to false, "serial" to null)) }
-                                    return@launch
-                                }
-                                val devicePath = device.deviceName
-                                val cmd = mutableListOf(fastbootBin.absolutePath, "-s", devicePath, "devices")
-                                val proc = ProcessBuilder(cmd).apply {
-                                    environment()["HOME"]   = filesDir.absolutePath
-                                    environment()["TMPDIR"] = cacheDir.absolutePath
-                                    redirectErrorStream(true)
-                                }.start()
-                                val out = proc.inputStream.bufferedReader().readText().trim()
-                                proc.waitFor(8, TimeUnit.SECONDS)
-                                connection.close()
-                                Log.d(TAG, "fastboot devices output: $out")
-                                val connected = out.isNotEmpty() && out.contains("\t")
-                                val serial = if (connected) out.lines()
-                                    .firstOrNull { it.contains("\t") }
-                                    ?.substringBefore("\t")?.trim() else null
-                                ui { result.success(mapOf("connected" to connected, "serial" to serial)) }
-                            } catch (e: Exception) {
+                            val session = FastbootSession.open(usbManager, device)
+                            if (session == null) {
                                 ui { result.success(mapOf("connected" to false, "serial" to null)) }
+                                return@launch
+                            }
+                            try {
+                                val (code, out) = session.runCommand("getvar:product")
+                                val serial = runCatching { device.serialNumber }.getOrNull()
+                                    ?: device.deviceName
+                                val connected = code == 0
+                                Log.i(TAG, "getDevices: connected=$connected serial=$serial out=$out")
+                                ui { result.success(mapOf("connected" to connected, "serial" to serial)) }
+                            } finally {
+                                session.close()
                             }
                         }
                     }
 
-                    // diagnose() → List<Map> 返回所有 USB 设备及其接口参数，用于排查设备识别问题
+                    // diagnose() → List<Map>
                     "diagnose" -> {
                         val usbManager = getSystemService(USB_SERVICE) as UsbManager
                         val deviceList = usbManager.deviceList.values.map { device ->
@@ -835,11 +828,11 @@ class MainActivity : FlutterActivity() {
                                 )
                             }
                             mapOf(
-                                "name"        to device.deviceName,
-                                "vendorId"    to "0x${device.vendorId.toString(16).uppercase()}",
-                                "productId"   to "0x${device.productId.toString(16).uppercase()}",
+                                "name"          to device.deviceName,
+                                "vendorId"      to "0x${device.vendorId.toString(16).uppercase()}",
+                                "productId"     to "0x${device.productId.toString(16).uppercase()}",
                                 "hasPermission" to usbManager.hasPermission(device),
-                                "interfaces"  to ifaces,
+                                "interfaces"    to ifaces,
                             )
                         }
                         result.success(deviceList)
@@ -848,8 +841,8 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, ADB_CHANNEL)
-            .setMethodCallHandler { call, result ->
+
+
                 when (call.method) {
 
                     "getNativeLibraryDir" ->
