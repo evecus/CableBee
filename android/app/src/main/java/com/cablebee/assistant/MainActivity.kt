@@ -643,49 +643,84 @@ class MainActivity : FlutterActivity() {
 
     /**
      * 已取得 USB 权限后直接执行 fastboot。
-     * 不使用 -d <fd>（Android 版 fastboot 不支持该选项）。
-     * App 进程已持有 USB 权限，子进程通过继承的 /dev/bus/usb 访问权限找到设备。
-     * 同时通过环境变量 ANDROID_SERIAL 锁定目标设备，避免多设备歧义。
+     *
+     * 经日志分析，此设备 ROM 允许 untrusted_app 直接访问 /dev/bus/usb 节点，
+     * 与 com.didjdk.adbhelper 相同：通过 sh -c 执行 fastboot，以设备路径 -s 指定设备。
+     * openDevice() 仍需调用以持有内核 USB 权限令牌，connection 在命令完成后关闭。
+     *
+     * 三级回退策略：
+     *   1. sh -c "fastboot -s /dev/bus/usb/XXX/YYY <args>"  （主路径，与参考 App 相同）
+     *   2. fastboot -s fd:N <args>                           （fd 透传，AOSP 标准）
+     *   3. fastboot -s /dev/bus/usb/XXX/YYY <args>          （直接 ProcessBuilder）
      */
     private fun runFastbootWithDevice(
         device: UsbDevice,
         args:   List<String>,
         result: MethodChannel.Result,
     ) {
-        val usbManager = getSystemService(USB_SERVICE) as UsbManager
-        // 必须先 openDevice，保持连接打开，让子进程能访问该设备节点
-        val connection = usbManager.openDevice(device)
+        val usbManager  = getSystemService(USB_SERVICE) as UsbManager
+        val connection  = usbManager.openDevice(device)
         if (connection == null) {
             ui { result.error("USB_OPEN_FAILED", "无法打开 USB 设备", null) }
             return
         }
 
         try {
-            // Android 版 fastboot 支持 -s /dev/bus/usb/XXX/YYY 直接指定设备节点
-            val devicePath = device.deviceName  // e.g. /dev/bus/usb/001/002
-            val cmd = mutableListOf(fastbootBin.absolutePath, "-s", devicePath) + args
-            Log.d(TAG, "fastboot exec: ${cmd.joinToString(" ")}")
+            val devicePath = device.deviceName          // e.g. /dev/bus/usb/001/002
+            val rawFd      = connection.fileDescriptor  // 内核授予 App 的 USB fd
 
-            val proc = ProcessBuilder(cmd).apply {
-                environment()["HOME"]   = filesDir.absolutePath
-                environment()["TMPDIR"] = cacheDir.absolutePath
-            }.redirectErrorStream(true).start()
+            // ── 执行单次 fastboot 并返回结果 ──────────────────────────────────
+            fun execFastboot(cmd: List<String>, label: String): Pair<Int, String> {
+                Log.d(TAG, "fastboot exec ($label): ${cmd.joinToString(" ")}")
+                val proc = ProcessBuilder(cmd).apply {
+                    environment()["HOME"]   = filesDir.absolutePath
+                    environment()["TMPDIR"] = cacheDir.absolutePath
+                }.redirectErrorStream(true).start()
+                val outBuf = StringBuilder()
+                val reader = Thread {
+                    try { outBuf.append(proc.inputStream.bufferedReader().readText()) }
+                    catch (_: Exception) {}
+                }.also { it.isDaemon = true; it.start() }
+                val exited   = proc.waitFor(30, TimeUnit.SECONDS)
+                if (!exited) proc.destroyForcibly()
+                reader.join(2_000)
+                val output   = outBuf.toString().trim()
+                val exitCode = if (exited) runCatching { proc.exitValue() }.getOrDefault(1) else 1
+                Log.d(TAG, "fastboot $label exit=$exitCode output=${output.take(200)}")
+                return exitCode to output
+            }
 
-            val outBuf = StringBuilder()
-            val reader = Thread {
-                try { outBuf.append(proc.inputStream.bufferedReader().readText()) }
-                catch (_: Exception) {}
-            }.also { it.isDaemon = true; it.start() }
+            val argsStr = args.joinToString(" ") { arg ->
+                if (arg.contains(" ")) "'$arg'" else arg
+            }
 
-            val exited = proc.waitFor(30, TimeUnit.SECONDS)
-            if (!exited) proc.destroyForcibly()
-            reader.join(2_000)
+            // ── 策略 1：sh -c（与 com.didjdk.adbhelper 相同，兼容性最好）──────
+            val (code1, out1) = execFastboot(
+                listOf("sh", "-c", "${fastbootBin.absolutePath} -s $devicePath $argsStr"),
+                "sh-path"
+            )
+            if (code1 == 0 || out1.isNotEmpty()) {
+                ui { result.success(mapOf("exitCode" to code1, "output" to out1)) }
+                return
+            }
 
-            val output   = outBuf.toString().trim()
-            val exitCode = if (exited) runCatching { proc.exitValue() }.getOrDefault(1) else 1
-            Log.d(TAG, "fastboot exit=$exitCode output=${output.take(200)}")
+            // ── 策略 2：fd 透传（AOSP fastboot 原生支持）────────────────────────
+            val (code2, out2) = execFastboot(
+                listOf("sh", "-c", "${fastbootBin.absolutePath} -s fd:$rawFd $argsStr"),
+                "sh-fd"
+            )
+            if (code2 == 0 || out2.isNotEmpty()) {
+                ui { result.success(mapOf("exitCode" to code2, "output" to out2)) }
+                return
+            }
 
-            ui { result.success(mapOf("exitCode" to exitCode, "output" to output)) }
+            // ── 策略 3：直接 ProcessBuilder（最后兜底）──────────────────────────
+            val (code3, out3) = execFastboot(
+                mutableListOf(fastbootBin.absolutePath, "-s", devicePath) + args,
+                "direct"
+            )
+            ui { result.success(mapOf("exitCode" to code3, "output" to out3)) }
+
         } catch (e: Exception) {
             Log.e(TAG, "fastboot error: ${e.message}")
             ui { result.error("FASTBOOT_ERROR", e.message, null) }
@@ -799,21 +834,21 @@ class MainActivity : FlutterActivity() {
                                     ui { result.success(mapOf("connected" to false, "serial" to null)) }
                                     return@launch
                                 }
-                                val devicePath = device.deviceName
-                                val cmd = mutableListOf(fastbootBin.absolutePath, "-s", devicePath, "devices")
+                                val rawFd = connection.fileDescriptor
+                                val cmd = mutableListOf(fastbootBin.absolutePath, "-s", "fd:$rawFd", "devices")
                                 val proc = ProcessBuilder(cmd).apply {
                                     environment()["HOME"]   = filesDir.absolutePath
                                     environment()["TMPDIR"] = cacheDir.absolutePath
                                     redirectErrorStream(true)
                                 }.start()
+                                // 先读完输出再 waitFor，避免 stdout 缓冲区满导致进程阻塞
                                 val out = proc.inputStream.bufferedReader().readText().trim()
                                 proc.waitFor(8, TimeUnit.SECONDS)
                                 connection.close()
                                 Log.d(TAG, "fastboot devices output: $out")
-                                val connected = out.isNotEmpty() && out.contains("\t")
-                                val serial = if (connected) out.lines()
-                                    .firstOrNull { it.contains("\t") }
-                                    ?.substringBefore("\t")?.trim() else null
+                                // fd 模式下 devices 输出格式是 "fd:N\tfastboot"，兼容判断
+                                val connected = out.isNotEmpty() && (out.contains("\t") || out.contains("fastboot"))
+                                val serial = if (connected) device.deviceName else null
                                 ui { result.success(mapOf("connected" to connected, "serial" to serial)) }
                             } catch (e: Exception) {
                                 ui { result.success(mapOf("connected" to false, "serial" to null)) }
