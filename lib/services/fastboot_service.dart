@@ -81,6 +81,29 @@ class FastbootService extends ChangeNotifier {
     }
     return map;
   }
+
+  /// 返回当前所有已连接 USB 设备的接口参数，用于排查设备识别问题
+  Future<String> diagnose() async {
+    try {
+      final List list = await _ch.invokeMethod('diagnose');
+      if (list.isEmpty) return '未发现任何 USB 设备';
+      final buf = StringBuffer();
+      for (final dev in list) {
+        final d = Map<String, dynamic>.from(dev as Map);
+        buf.writeln('设备: ${d['name']}');
+        buf.writeln('  VID=${d['vendorId']}  PID=${d['productId']}  权限=${d['hasPermission']}');
+        final ifaces = d['interfaces'] as List;
+        for (final iface in ifaces) {
+          final f = Map<String, dynamic>.from(iface as Map);
+          buf.writeln('  接口[${f['index']}] class=${f['class']} sub=${f['subclass']} prot=${f['protocol']}');
+        }
+        buf.writeln();
+      }
+      return buf.toString().trimRight();
+    } on PlatformException catch (e) {
+      return '诊断失败: ${e.message}';
+    }
+  }
 }
 
 class FastbootResult {

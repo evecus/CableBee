@@ -137,7 +137,15 @@ class _FastbootScreenState extends State<FastbootScreen> {
         children: [
 
           // ── 设备状态卡片 ──
-          _DeviceStatusCard(),
+          _DeviceStatusCard(
+            onDiagnose: (lines) {
+              setState(() {
+                _outputLines.addAll(lines);
+                _outputLines.add('');
+              });
+              _scrollToBottom();
+            },
+          ),
 
           const SizedBox(height: 12),
 
@@ -531,7 +539,8 @@ class _ExecBtn extends StatelessWidget {
 // ── 设备状态卡片 ───────────────────────────────────────────────────────────────
 
 class _DeviceStatusCard extends StatelessWidget {
-  const _DeviceStatusCard();
+  const _DeviceStatusCard({required this.onDiagnose});
+  final void Function(List<String> lines) onDiagnose;
 
   @override
   Widget build(BuildContext context) {
@@ -592,6 +601,18 @@ class _DeviceStatusCard extends StatelessWidget {
             ],
           ],
         )),
+        // 诊断按钮
+        IconButton(
+          icon: const Icon(Icons.bug_report_rounded, size: 18, color: AppTheme.textMuted),
+          tooltip: 'USB 诊断',
+          onPressed: () async {
+            onDiagnose(['[USB 诊断] 读取中...']);
+            final info = await context.read<FastbootService>().diagnose();
+            onDiagnose(['[USB 诊断]', ...info.split('\n')]);
+          },
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+        ),
         // 刷新按钮
         IconButton(
           icon: const Icon(Icons.refresh_rounded, size: 18, color: AppTheme.textMuted),

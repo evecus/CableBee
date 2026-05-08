@@ -823,11 +823,33 @@ class MainActivity : FlutterActivity() {
                         }
                     }
 
+                    // diagnose() → List<Map> 返回所有 USB 设备及其接口参数，用于排查设备识别问题
+                    "diagnose" -> {
+                        val usbManager = getSystemService(USB_SERVICE) as UsbManager
+                        val deviceList = usbManager.deviceList.values.map { device ->
+                            val ifaces = (0 until device.interfaceCount).map { i ->
+                                val iface = device.getInterface(i)
+                                mapOf(
+                                    "index"    to i,
+                                    "class"    to "0x${iface.interfaceClass.toString(16).uppercase()}",
+                                    "subclass" to "0x${iface.interfaceSubclass.toString(16).uppercase()}",
+                                    "protocol" to "0x${iface.interfaceProtocol.toString(16).uppercase()}",
+                                )
+                            }
+                            mapOf(
+                                "name"        to device.deviceName,
+                                "vendorId"    to "0x${device.vendorId.toString(16).uppercase()}",
+                                "productId"   to "0x${device.productId.toString(16).uppercase()}",
+                                "hasPermission" to usbManager.hasPermission(device),
+                                "interfaces"  to ifaces,
+                            )
+                        }
+                        result.success(deviceList)
+                    }
+
                     else -> result.notImplemented()
                 }
             }
-
-        // ── ADB ───────────────────────────────────────────────────────────
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, ADB_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
