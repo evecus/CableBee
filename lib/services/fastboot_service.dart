@@ -1,68 +1,77 @@
-import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-import 'binary_manager.dart';
 
-const _ch = MethodChannel('com.cablebee/adb');
+const _ch = MethodChannel('com.cablebee/fastboot');
 
 class FastbootService extends ChangeNotifier {
-  final BinaryManager _binaries;
-
   bool    _deviceConnected = false;
   String? _deviceSerial;
 
   bool    get deviceConnected => _deviceConnected;
   String? get deviceSerial    => _deviceSerial;
 
-  FastbootService(this._binaries);
+  // ── 内部：调用 Kotlin 层执行 fastboot ────────────────────────────────────
 
-  // ── run fastboot subprocess ───────────────────────────────────────────────
-
-  Future<FastbootResult> run(List<String> args) async {
-    final fb = _binaries.fastbootPath;
-    if (fb == null) {
-      return FastbootResult(exitCode: -1, output: 'fastboot binary not ready');
-    }
+  Future<FastbootResult> _invoke(List<String> args) async {
     try {
-      final result = await Process.run(
-        fb, args,
-        stdoutEncoding: utf8,
-        stderrEncoding: utf8,
-      );
+      final Map result = await _ch.invokeMethod('run', {'args': args});
       return FastbootResult(
-        exitCode: result.exitCode,
-        output: '${result.stdout}${result.stderr}'.trim(),
+        exitCode: result['exitCode'] as int,
+        output:   result['output']  as String,
       );
+    } on PlatformException catch (e) {
+      return FastbootResult(exitCode: -1, output: e.message ?? e.code);
     } catch (e) {
       return FastbootResult(exitCode: -1, output: e.toString());
     }
   }
 
+  // ── 设备检测 ─────────────────────────────────────────────────────────────
+
   Future<FastbootResult> devices() async {
-    final r = await run(['devices']);
-    _deviceConnected = r.output.isNotEmpty &&
-        !r.output.contains('no permissions') &&
-        r.output.contains('\t');
-    _deviceSerial = _deviceConnected
-        ? r.output.split('\t').first.trim()
-        : null;
-    notifyListeners();
-    return r;
+    try {
+      final Map map = await _ch.invokeMethod('getDevices');
+      _deviceConnected = map['connected'] as bool? ?? false;
+      _deviceSerial    = map['serial']    as String?;
+      notifyListeners();
+      final output = _deviceConnected
+          ? '$_deviceSerial\tfastboot'
+          : (map['needsPermission'] == true ? '(需要 USB 权限，请重试)' : '');
+      return FastbootResult(exitCode: 0, output: output);
+    } on PlatformException catch (e) {
+      _deviceConnected = false;
+      _deviceSerial    = null;
+      notifyListeners();
+      return FastbootResult(exitCode: -1, output: e.message ?? e.code);
+    }
   }
 
-  Future<FastbootResult> getVar(String variable)          => run(['getvar', variable]);
-  Future<FastbootResult> flash(String part, String path)  => run(['flash', part, path]);
-  Future<FastbootResult> erase(String partition)          => run(['erase', partition]);
-  Future<FastbootResult> reboot([String? target])         =>
-      target != null ? run(['reboot', target]) : run(['reboot']);
-  Future<FastbootResult> oemUnlock()                      => run(['flashing', 'unlock']);
-  Future<FastbootResult> oemLock()                        => run(['flashing', 'lock']);
-  Future<FastbootResult> wipeData()                       => run(['-w']);
-  Future<FastbootResult> runRaw(List<String> args)        => run(args);
+  // ── 命令封装 ─────────────────────────────────────────────────────────────
+
+  Future<FastbootResult> run(List<String> args) => _invoke(args);
+
+  Future<FastbootResult> getVar(String variable) =>
+      _invoke(['getvar', variable]);
+
+  Future<FastbootResult> flash(String part, String path) =>
+      _invoke(['flash', part, path]);
+
+  Future<FastbootResult> erase(String partition) =>
+      _invoke(['erase', partition]);
+
+  Future<FastbootResult> reboot([String? target]) =>
+      target != null ? _invoke(['reboot', target]) : _invoke(['reboot']);
+
+  Future<FastbootResult> oemUnlock() => _invoke(['flashing', 'unlock']);
+
+  Future<FastbootResult> oemLock()   => _invoke(['flashing', 'lock']);
+
+  Future<FastbootResult> wipeData()  => _invoke(['-w']);
+
+  Future<FastbootResult> runRaw(List<String> args) => _invoke(args);
 
   Future<Map<String, String>> getAllVars() async {
-    final r   = await run(['getvar', 'all']);
+    final r   = await _invoke(['getvar', 'all']);
     final map = <String, String>{};
     for (final line in r.output.split('\n')) {
       final idx = line.indexOf(':');

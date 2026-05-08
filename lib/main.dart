@@ -41,10 +41,7 @@ class CableBeeApp extends StatelessWidget {
           create: (ctx) => AdbService(ctx.read<BinaryManager>()),
           update: (_, bins, prev) => prev ?? AdbService(bins),
         ),
-        ChangeNotifierProxyProvider<BinaryManager, FastbootService>(
-          create: (ctx) => FastbootService(ctx.read<BinaryManager>()),
-          update: (_, bins, prev) => prev ?? FastbootService(bins),
-        ),
+        ChangeNotifierProvider(create: (_) => FastbootService()),
         ChangeNotifierProvider(create: (_) => UsbService()),
       ],
       child: MaterialApp(

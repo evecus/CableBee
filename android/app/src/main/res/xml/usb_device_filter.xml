@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- ADB interface class: 0xFF, subclass: 0x42, protocol: 0x01 -->
 <resources>
+    <!-- ADB interface: class=0xFF, subclass=0x42, protocol=0x01 -->
     <usb-device class="0xFF" subclass="0x42" protocol="0x01" />
+    <!-- Fastboot interface: class=0xFF, subclass=0x42, protocol=0x03 -->
+    <usb-device class="0xFF" subclass="0x42" protocol="0x03" />
+    <!-- Fastboot (some OEM): class=0xFF, subclass=0x00, protocol=0x00 -->
+    <usb-device class="0xFF" subclass="0x00" protocol="0x00" />
 </resources>
