@@ -661,17 +661,14 @@ class MainActivity : FlutterActivity() {
         }
 
         try {
-            val cmd = mutableListOf(fastbootBin.absolutePath) + args
+            // Android 版 fastboot 支持 -s /dev/bus/usb/XXX/YYY 直接指定设备节点
+            val devicePath = device.deviceName  // e.g. /dev/bus/usb/001/002
+            val cmd = mutableListOf(fastbootBin.absolutePath, "-s", devicePath) + args
             Log.d(TAG, "fastboot exec: ${cmd.joinToString(" ")}")
 
             val proc = ProcessBuilder(cmd).apply {
-                environment()["HOME"]            = filesDir.absolutePath
-                environment()["TMPDIR"]          = cacheDir.absolutePath
-                // 锁定设备序列号（fastboot 通过 USB 序列号匹配）
-                val serial = runCatching { device.serialNumber }.getOrNull()
-                if (!serial.isNullOrEmpty()) {
-                    environment()["ANDROID_SERIAL"] = serial
-                }
+                environment()["HOME"]   = filesDir.absolutePath
+                environment()["TMPDIR"] = cacheDir.absolutePath
             }.redirectErrorStream(true).start()
 
             val outBuf = StringBuilder()
@@ -802,7 +799,8 @@ class MainActivity : FlutterActivity() {
                                     ui { result.success(mapOf("connected" to false, "serial" to null)) }
                                     return@launch
                                 }
-                                val cmd = mutableListOf(fastbootBin.absolutePath, "devices")
+                                val devicePath = device.deviceName
+                                val cmd = mutableListOf(fastbootBin.absolutePath, "-s", devicePath, "devices")
                                 val proc = ProcessBuilder(cmd).apply {
                                     environment()["HOME"]   = filesDir.absolutePath
                                     environment()["TMPDIR"] = cacheDir.absolutePath
