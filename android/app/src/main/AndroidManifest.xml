@@ -25,6 +25,8 @@
 
     <!-- 配对本机：发送通知（Android 13+ 需要运行时申请） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
 
     <application
         android:label="CableBee"
@@ -76,5 +78,15 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths"/>
         </provider>
+        <!-- 前台 Service：fastboot 执行期间防止子进程被 PhantomProcess 杀死 -->
+        <service
+            android:name=".FastbootForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="fastboot_exec"/>
+        </service>
+
     </application>
 </manifest>
