@@ -665,6 +665,12 @@ class MainActivity : FlutterActivity() {
             return
         }
 
+        // ── 启动前台 Service，防止子进程被 PhantomProcess 杀死 ──────────
+        startService(
+            android.content.Intent(this@MainActivity, FastbootForegroundService::class.java)
+                .setAction(FastbootForegroundService.ACTION_START)
+        )
+
         try {
             val devicePath = device.deviceName          // e.g. /dev/bus/usb/001/002
             val rawFd      = connection.fileDescriptor  // 内核授予 App 的 USB fd
@@ -726,6 +732,11 @@ class MainActivity : FlutterActivity() {
             ui { result.error("FASTBOOT_ERROR", e.message, null) }
         } finally {
             connection.close()
+            // ── 停止前台 Service ───────────────────────────────────────────────
+            startService(
+                android.content.Intent(this@MainActivity, FastbootForegroundService::class.java)
+                    .setAction(FastbootForegroundService.ACTION_STOP)
+            )
         }
     }
 
